@@ -7,3 +7,6 @@ edition = "2021"
 
 [dev-dependencies]
 miniz_oxide = "0.6.0"
+
+[dependencies]
+adler32 = "1.2.0"
