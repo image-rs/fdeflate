@@ -11,9 +11,122 @@ pub enum Status {
     NeedMoreOutputSpace,
 }
 
-struct Table {
-    code: [u16; 286],
-    nbits: [u8; 286],
+// Dynamic programming huffman tree algorithm from fpnge.
+fn compute_code_lengths(
+    freqs: &[u64],
+    min_limit: &[u8],
+    max_limit: &[u8],
+    calculated_nbits: &mut [u8],
+) {
+    debug_assert_eq!(freqs.len(), min_limit.len());
+    debug_assert_eq!(freqs.len(), max_limit.len());
+    debug_assert_eq!(freqs.len(), calculated_nbits.len());
+    let len = freqs.len();
+
+    for i in 0..len {
+        debug_assert!(min_limit[i] >= 1);
+        debug_assert!(min_limit[i] <= max_limit[i]);
+    }
+
+    let precision = *max_limit.iter().max().unwrap();
+    let num_patterns = 1 << precision;
+
+    let mut dynp = vec![u64::MAX; (num_patterns + 1) * (len + 1)];
+    let index = |sym: usize, off: usize| sym * (num_patterns + 1) + off;
+
+    dynp[index(0, 0)] = 0;
+    for sym in 0..len {
+        for bits in min_limit[sym]..=max_limit[sym] {
+            let off_delta = 1 << (precision - bits);
+            for off in 0..=num_patterns.saturating_sub(off_delta) {
+                dynp[index(sym + 1, off + off_delta)] = dynp[index(sym, off)]
+                    .saturating_add(freqs[sym] * u64::from(bits))
+                    .min(dynp[index(sym + 1, off + off_delta)]);
+            }
+        }
+    }
+
+    let mut sym = len;
+    let mut off = num_patterns;
+
+    while sym > 0 {
+        sym -= 1;
+        assert!(off > 0);
+
+        for bits in min_limit[sym]..=max_limit[sym] {
+            let off_delta = 1 << (precision - bits);
+            if off_delta <= off
+                && dynp[index(sym + 1, off)]
+                    == dynp[index(sym, off - off_delta)].saturating_add(freqs[sym] * u64::from(bits))
+            {
+                off -= off_delta;
+                calculated_nbits[sym] = bits;
+                break;
+            }
+        }
+    }
+
+    for i in 0..len {
+        debug_assert!(calculated_nbits[i] >= min_limit[i]);
+        debug_assert!(calculated_nbits[i] <= max_limit[i]);
+    }
+}
+
+fn build_literal_length_tree(buf: &[u8]) -> Vec<u8> {
+    let mut counts = vec![1u64; 47];
+    counts[46] = 1;
+    for &b in buf {
+        match b {
+            0..=15 => counts[b as usize] += 1,
+            240..=255 => counts[b as usize - 240 + 16] += 1,
+            b => counts[((b - 16) >> 4) as usize + 32] += 1,
+        }
+    }
+
+    let mut min_limit = vec![1u8; 47];
+    let max_limit = vec![8u8; 47];
+    for i in 32..46 {
+        min_limit[i] = 8;
+    }
+
+    let mut lengths = vec![0u8; 47];
+    compute_code_lengths(&counts, &min_limit, &max_limit, &mut lengths);
+
+    let mut output_lengths = Vec::with_capacity(257);
+    output_lengths.extend_from_slice(&lengths[..16]);
+    for &len in &lengths[32..46] {
+        output_lengths.extend_from_slice(&[len + 4; 16]);
+    }
+    output_lengths.extend_from_slice(&lengths[16..32]);
+    output_lengths.push(lengths[46]);
+    assert_eq!(output_lengths.len(), 257);
+
+    for i in 16..240 {
+        assert_eq!(output_lengths[i], 12);
+    }
+
+    output_lengths
+}
+
+fn compute_codes(lengths: &[u8]) -> Vec<u16> {
+    let mut codes = vec![0u16; lengths.len()];
+
+    let max_length = *lengths.iter().max().unwrap();
+
+    let mut code = 0u16;
+    for len in 1..=max_length {
+        for (i, &length) in lengths.iter().enumerate() {
+            if length == len {
+                codes[i] = code.reverse_bits() >> (16 - len);
+                code += 1;
+            }
+        }
+        code <<= 1;
+    }
+
+    assert_eq!(code, 2 << max_length);
+
+    codes
 }
 
 pub struct Compressor {
@@ -86,12 +199,14 @@ impl Compressor {
             self.write_bits(4, 3, &mut out_buf);
         }
 
-        // Write code lengths for literal/length alphabet
-        for _ in 0..255 {
-            self.write_bits(0b0001, 4, &mut out_buf); // 8 bits for first 255 codes
-        }
-        for _ in 0..2 {
-            self.write_bits(0b1001, 4, &mut out_buf); // 9 bits for last 2 codes
+        let lengths = build_literal_length_tree(in_buf);
+        assert_eq!(lengths.len(), 257);
+        for &len in &lengths {
+            self.write_bits(
+                (len.reverse_bits() >> 4) as u64,
+                4,
+                &mut out_buf,
+            );
         }
 
         // Write code lengths for distance alphabet
@@ -100,16 +215,17 @@ impl Compressor {
         }
 
         // Write data
+        let codes = compute_codes(&lengths);
         for &byte in in_buf {
-            if byte != 255 {
-                self.write_bits(byte.reverse_bits() as u64, 8, &mut out_buf);
-            } else {
-                self.write_bits(0b1_1111_1110, 9, &mut out_buf);
-            }
+            self.write_bits(
+                codes[byte as usize] as u64,
+                lengths[byte as usize],
+                &mut out_buf,
+            );
         }
 
         // Write end of block
-        self.write_bits(0b1_1111_1111, 9, &mut out_buf);
+        self.write_bits(codes[256] as u64, lengths[256], &mut out_buf);
         self.flush(&mut out_buf);
 
         // Write Adler32 checksum
@@ -155,6 +271,7 @@ pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     fn roundtrip(data: &[u8]) {
         let compressed = compress_to_vec(data);
@@ -165,5 +282,25 @@ mod tests {
     #[test]
     fn it_works() {
         roundtrip(b"Hello world!");
+    }
+
+    #[test]
+    fn constant() {
+        roundtrip(&vec![0; 2048]);
+        roundtrip(&vec![5; 2048]);
+        roundtrip(&vec![128; 2048]);
+        roundtrip(&vec![254; 2048]);
+    }
+
+    #[test]
+    fn random() {
+        let mut rng = rand::thread_rng();
+        let mut data = vec![0; 2048];
+        for _ in 0..10 {
+            for byte in &mut data {
+                *byte = rng.gen();
+            }
+            roundtrip(&data);
+        }
     }
 }
