@@ -5,9 +5,12 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[dependencies]
+bytemuck = "1.12.3"
+libmath = "0.2.1"
+simd-adler32 = "0.3.4"
+
 [dev-dependencies]
+criterion = "0.3"
 miniz_oxide = "0.6.0"
 rand = "0.8.5"
-
-[dependencies]
-adler32 = "1.2.0"
