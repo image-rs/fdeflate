@@ -67,7 +67,7 @@ fn main() {
         }
 
         for i in 3..raw.len() {
-            if raw[i-1] == raw[i] && raw[i-2] == raw[i] && raw[i-3] == raw[i] {
+            if raw[i - 1] == raw[i] && raw[i - 2] == raw[i] && raw[i - 3] == raw[i] {
                 if raw[i] == 0 {
                     zero_run += 1;
                 } else {
@@ -77,31 +77,53 @@ fn main() {
         }
 
         for a in raw.chunks_exact(9) {
-            if &a != &[0;9] && &a[0..6] == &a[3..9] {
+            if a != [0; 9] && a[0..6] == a[3..9] {
                 pixel_run += 9;
             }
         }
-
     }
     println!();
     println!();
 
     let mut lengths = vec![0; 286];
     fdeflate::compute_code_lengths(&counts, &[1; 286], &[12; 286], &mut lengths);
-    let mut compression12 = lengths.iter().zip(&counts).map(|(&l, &c)| u64::from(l) * c).sum::<u64>() as f64 / 8.0 / total_bytes as f64;
+    let compression12 = lengths
+        .iter()
+        .zip(&counts)
+        .map(|(&l, &c)| u64::from(l) * c)
+        .sum::<u64>() as f64
+        / 8.0
+        / total_bytes as f64;
 
     println!();
     println!("lengths = {:?}", lengths);
     println!();
 
     fdeflate::compute_code_lengths(&counts, &[1; 286], &[15; 286], &mut lengths);
-    let mut compression15 = lengths.iter().zip(&counts).map(|(&l, &c)| u64::from(l) * c).sum::<u64>() as f64 / 8.0 / total_bytes as f64;
+    let compression15 = lengths
+        .iter()
+        .zip(&counts)
+        .map(|(&l, &c)| u64::from(l) * c)
+        .sum::<u64>() as f64
+        / 8.0
+        / total_bytes as f64;
 
-    println!("compression12 = {}%, compression15 = {}%", compression12 * 100.0, compression15 * 100.0);
+    println!(
+        "compression12 = {}%, compression15 = {}%",
+        compression12 * 100.0,
+        compression15 * 100.0
+    );
     println!();
 
-    println!("Zero run: {:.2}%, Nonzero: {:.2}%", 100.0 * zero_run as f64 / total_bytes as f64, 100.0 * run as f64 / total_bytes as f64);
-    println!("Pixel run: {:.2}%", 100.0 * pixel_run as f64 / total_bytes as f64);
+    println!(
+        "Zero run: {:.2}%, Nonzero: {:.2}%",
+        100.0 * zero_run as f64 / total_bytes as f64,
+        100.0 * run as f64 / total_bytes as f64
+    );
+    println!(
+        "Pixel run: {:.2}%",
+        100.0 * pixel_run as f64 / total_bytes as f64
+    );
 
     let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
     let geomean = (ratios.iter().map(|r| r.ln()).sum::<f64>() / ratios.len() as f64).exp();
