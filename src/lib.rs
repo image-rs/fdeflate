@@ -2,7 +2,11 @@
 #![feature(test)]
 extern crate test;
 
-use std::io::Write;
+use std::io::{self, Cursor, Write};
+
+use simd_adler32::Adler32;
+
+pub mod decode;
 
 #[derive(Copy, Clone, Debug)]
 pub enum Flush {
@@ -16,54 +20,41 @@ pub enum Status {
 }
 
 /// Length code for length values.
-#[rustfmt::skip]
 pub const LEN_SYM: [u16; 256] = [
-    257, 258, 259, 260, 261, 262, 263, 264, 265, 265, 266, 266, 267, 267, 268, 268,
-    269, 269, 269, 269, 270, 270, 270, 270, 271, 271, 271, 271, 272, 272, 272, 272,
-    273, 273, 273, 273, 273, 273, 273, 273, 274, 274, 274, 274, 274, 274, 274, 274,
-    275, 275, 275, 275, 275, 275, 275, 275, 276, 276, 276, 276, 276, 276, 276, 276,
-    277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277,
-    278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278,
-    279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279,
-    280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280,
-    281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281,
-    281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281,
-    282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282,
-    282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282,
-    283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283,
-    283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283,
-    284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284,
-    284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 285
+    257, 258, 259, 260, 261, 262, 263, 264, 265, 265, 266, 266, 267, 267, 268, 268, 269, 269, 269,
+    269, 270, 270, 270, 270, 271, 271, 271, 271, 272, 272, 272, 272, 273, 273, 273, 273, 273, 273,
+    273, 273, 274, 274, 274, 274, 274, 274, 274, 274, 275, 275, 275, 275, 275, 275, 275, 275, 276,
+    276, 276, 276, 276, 276, 276, 276, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277, 277,
+    277, 277, 277, 277, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278, 278,
+    278, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 279, 280, 280,
+    280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 281, 281, 281, 281, 281,
+    281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281, 281,
+    281, 281, 281, 281, 281, 281, 281, 281, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282,
+    282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282, 282,
+    282, 282, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283,
+    283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 283, 284, 284, 284, 284,
+    284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284, 284,
+    284, 284, 284, 284, 284, 284, 284, 284, 285,
 ];
 
 /// Number of extra bits for length values.
-#[rustfmt::skip]
 pub const LEN_EXTRA: [u8; 256] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0,
 ];
 
-#[rustfmt::skip]
 const BITMASKS: [u32; 17] = [
-    0x0000, 0x0001, 0x0003, 0x0007, 0x000F, 0x001F, 0x003F, 0x007F, 0x00FF,
-    0x01FF, 0x03FF, 0x07FF, 0x0FFF, 0x1FFF, 0x3FFF, 0x7FFF, 0xFFFF
+    0x0000, 0x0001, 0x0003, 0x0007, 0x000F, 0x001F, 0x003F, 0x007F, 0x00FF, 0x01FF, 0x03FF, 0x07FF,
+    0x0FFF, 0x1FFF, 0x3FFF, 0x7FFF, 0xFFFF,
 ];
 
-const HUFFMAN_LENGTHS: [u8; 288] = [
+const HUFFMAN_LENGTHS: [u8; 286] = [
     2, 3, 4, 5, 5, 6, 6, 7, 7, 7, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10,
     11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
     12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
@@ -75,7 +66,7 @@ const HUFFMAN_LENGTHS: [u8; 288] = [
     12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 11, 11, 11, 11,
     11, 11, 11, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 7,
     7, 7, 6, 6, 6, 5, 4, 3, 12, 8, 8, 9, 9, 11, 10, 11, 11, 10, 11, 11, 11, 11, 11, 11, 12, 11, 12,
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 9, 0, 0,
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 9,
 ];
 
 // Dynamic programming huffman tree algorithm from fpnge.
@@ -140,8 +131,8 @@ pub fn compute_code_lengths(
     }
 }
 
-fn compute_codes(lengths: &[u8]) -> Vec<u16> {
-    let mut codes = vec![0u16; lengths.len()];
+fn compute_codes<const NSYMS: usize>(lengths: &[u8; NSYMS]) -> [u16; NSYMS] {
+    let mut codes = [0u16; NSYMS];
 
     let max_length = *lengths.iter().max().unwrap();
 
@@ -161,194 +152,317 @@ fn compute_codes(lengths: &[u8]) -> Vec<u16> {
     codes
 }
 
-#[derive(Default)]
-pub struct Compressor {
+pub struct Compressor<W: Write> {
     buffer: u64,
     nbits: u8,
     bytes_written: usize,
+
+    codes: [u16; 286],
+    lengths: [u8; 286],
+
+    writer: W,
+    checksum: Adler32,
 }
-impl Compressor {
-    fn write_bits(&mut self, bits: u64, nbits: u8, output: &mut &mut [u8]) {
+impl<W: Write> Compressor<W> {
+    fn write_bits(&mut self, bits: u64, nbits: u8) -> io::Result<()> {
         debug_assert!(nbits <= 64);
 
         self.buffer |= bits << self.nbits;
         self.nbits += nbits;
 
         if self.nbits >= 64 {
-            output.write_all(&self.buffer.to_le_bytes()).unwrap();
+            self.writer.write_all(&self.buffer.to_le_bytes())?;
             self.nbits -= 64;
             self.buffer = bits.checked_shr((nbits - self.nbits) as u32).unwrap_or(0);
             self.bytes_written += 8;
         }
         debug_assert!(self.nbits < 64);
+        Ok(())
     }
 
-    fn flush_to_byte_boundary(&mut self, output: &mut &mut [u8]) {
+    fn flush_to_byte_boundary(&mut self) -> io::Result<()> {
         if self.nbits % 8 != 0 {
-            self.write_bits(0, 8 - self.nbits % 8, output);
+            self.write_bits(0, 8 - self.nbits % 8)?;
         }
+        Ok(())
     }
 
-    fn flush(&mut self, output: &mut &mut [u8]) {
-        self.flush_to_byte_boundary(output);
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_to_byte_boundary()?;
         if self.nbits > 0 {
-            output
+            self.writer
                 .write_all(&self.buffer.to_le_bytes()[..self.nbits as usize / 8])
                 .unwrap();
             self.bytes_written += self.nbits as usize / 8;
             self.buffer = 0;
             self.nbits = 0;
         }
+        Ok(())
     }
 
-    fn write_run(&mut self, mut run: u32, lengths: &[u8], codes: &[u16], out_buf: &mut &mut [u8]) {
-        self.write_bits(codes[0] as u64, lengths[0], out_buf);
+    fn write_run(&mut self, mut run: u32) -> io::Result<()> {
+        self.write_bits(self.codes[0] as u64, self.lengths[0])?;
         run -= 1;
 
         while run >= 258 {
-            self.write_bits(codes[285] as u64, lengths[285] + 1, out_buf);
+            self.write_bits(self.codes[285] as u64, self.lengths[285] + 1)?;
             run -= 258;
         }
 
         if run >= 3 {
             let sym = LEN_SYM[run as usize - 3] as usize;
-            self.write_bits(codes[sym] as u64, lengths[sym], out_buf);
+            self.write_bits(self.codes[sym] as u64, self.lengths[sym])?;
 
             let len_extra = LEN_EXTRA[run as usize - 3];
             let extra = ((run - 3) & BITMASKS[len_extra as usize]) as u64;
-            self.write_bits(extra, len_extra + 1, out_buf);
+            self.write_bits(extra, len_extra + 1)?;
             run = 0;
         }
 
         for _ in 0..run {
-            self.write_bits(codes[0] as u64, lengths[0], out_buf);
+            self.write_bits(self.codes[0] as u64, self.lengths[0])?;
         }
+
+        Ok(())
     }
 
-    fn compress_simple(
-        &mut self,
-        data: &[u8],
-        lengths: &[u8],
-        codes: &[u16],
-        out_buf: &mut &mut [u8],
-    ) {
+    fn compress_simple(&mut self, data: &[u8]) -> io::Result<()> {
+        self.checksum.write(data);
+
+        const CHUNK_SIZE: usize = 64;
+
         let mut run = 0;
-        let mut chunks = data.chunks_exact(4);
+        let mut chunks = data.chunks_exact(CHUNK_SIZE);
         for chunk in &mut chunks {
-            if chunk == [0; 4] {
-                run += 4;
+            let mut mask = 0u64;
+            for s in chunk.chunks_exact(8) {
+                mask |= u64::from_ne_bytes(s.try_into().unwrap());
+            }
+            if mask == 0 {
+                run += CHUNK_SIZE as u32;
                 continue;
-            } else if run > 0 {
-                self.write_run(run, lengths, codes, out_buf);
-                run = 0;
             }
 
-            /*for chunk in chunk.chunks_exact(4)*/
-            {
-                let n0 = lengths[chunk[0] as usize];
-                let n1 = lengths[chunk[1] as usize];
-                let n2 = lengths[chunk[2] as usize];
-                let n3 = lengths[chunk[3] as usize];
+            for chunk in chunk.chunks_exact(4) {
+                if chunk == [0; 4] {
+                    run += 4;
+                    continue;
+                } else if run > 0 {
+                    self.write_run(run)?;
+                    run = 0;
+                }
 
-                let bits = codes[chunk[0] as usize] as u64
-                    | ((codes[chunk[1] as usize] as u64) << n0)
-                    | ((codes[chunk[2] as usize] as u64) << (n0 + n1))
-                    | ((codes[chunk[3] as usize] as u64) << (n0 + n1 + n2));
+                let n0 = self.lengths[chunk[0] as usize];
+                let n1 = self.lengths[chunk[1] as usize];
+                let n2 = self.lengths[chunk[2] as usize];
+                let n3 = self.lengths[chunk[3] as usize];
+
+                let bits = self.codes[chunk[0] as usize] as u64
+                    | ((self.codes[chunk[1] as usize] as u64) << n0)
+                    | ((self.codes[chunk[2] as usize] as u64) << (n0 + n1))
+                    | ((self.codes[chunk[3] as usize] as u64) << (n0 + n1 + n2));
 
                 let nbits = n0 + n1 + n2 + n3;
-                self.write_bits(bits, nbits, out_buf);
+                self.write_bits(bits, nbits)?;
             }
         }
 
         if run > 0 {
-            self.write_run(run, lengths, codes, out_buf);
+            self.write_run(run)?;
         }
 
         for &b in chunks.remainder() {
-            self.write_bits(codes[b as usize] as u64, lengths[b as usize], out_buf);
+            self.write_bits(self.codes[b as usize] as u64, self.lengths[b as usize])?;
+        }
+
+        Ok(())
+    }
+
+    // fn compress_simple2(
+    //     &mut self,
+    //     data: &[u8],
+    //     lengths: &[u8],
+    //     codes: &[u16],
+    //     out_buf: &mut &mut [u8],
+    // ) {
+    //     let mut run = 0;
+    //     let mut chunks = data.chunks_exact(24);
+    //     for chunk in &mut chunks {
+    //         if chunk == [0; 24] {
+    //             run += 24;
+    //         } else if chunk.chunks_exact(4).any(|c| c == [0; 4]) {
+    //             for chunk in chunk.chunks_exact(4) {
+    //                 if chunk == [0; 4] {
+    //                     run += 4;
+    //                     continue;
+    //                 } else if run > 0 {
+    //                     self.write_run(run, lengths, codes, out_buf);
+    //                     run = 0;
+    //                 }
+
+    //                 let n0 = lengths[chunk[0] as usize];
+    //                 let n1 = lengths[chunk[1] as usize];
+    //                 let n2 = lengths[chunk[2] as usize];
+    //                 let n3 = lengths[chunk[3] as usize];
+
+    //                 let bits = codes[chunk[0] as usize] as u64
+    //                     | ((codes[chunk[1] as usize] as u64) << n0)
+    //                     | ((codes[chunk[2] as usize] as u64) << (n0 + n1))
+    //                     | ((codes[chunk[3] as usize] as u64) << (n0 + n1 + n2));
+
+    //                 let nbits = n0 + n1 + n2 + n3;
+    //                 self.write_bits(bits, nbits, out_buf);
+    //             }
+    //         } else {
+    //             for chunk in chunk.chunks_exact(4) {
+    //                 let n0 = lengths[chunk[0] as usize];
+    //                 let n1 = lengths[chunk[1] as usize];
+    //                 let n2 = lengths[chunk[2] as usize];
+    //                 let n3 = lengths[chunk[3] as usize];
+
+    //                 let bits = codes[chunk[0] as usize] as u64
+    //                     | ((codes[chunk[1] as usize] as u64) << n0)
+    //                     | ((codes[chunk[2] as usize] as u64) << (n0 + n1))
+    //                     | ((codes[chunk[3] as usize] as u64) << (n0 + n1 + n2));
+
+    //                 let nbits = n0 + n1 + n2 + n3;
+    //                 self.write_bits(bits, nbits, out_buf);
+    //             }
+    //         }
+    //     }
+
+    //     if run > 0 {
+    //         self.write_run(run, lengths, codes, out_buf);
+    //     }
+
+    //     for &b in chunks.remainder() {
+    //         self.write_bits(codes[b as usize] as u64, lengths[b as usize], out_buf);
+    //     }
+    // }
+
+    // fn compress_simple3(
+    //     &mut self,
+    //     data: &[u8],
+    //     lengths: &[u8],
+    //     codes: &[u16],
+    //     out_buf: &mut &mut [u8],
+    // ) {
+    //     let mut run = 0;
+    //     let mut chunks = data.chunks_exact(8);
+    //     for chunk in &mut chunks {
+    //         if chunk == [0; 8] {
+    //             run += 8;
+    //             continue;
+    //         } else if run > 0 {
+    //             self.write_run(run, lengths, codes, out_buf);
+    //             run = 0;
+    //         }
+
+    //         let n0 = lengths[chunk[0] as usize];
+    //         let n1 = lengths[chunk[1] as usize];
+    //         let n2 = lengths[chunk[2] as usize];
+    //         let n3 = lengths[chunk[3] as usize];
+
+    //         let bits = codes[chunk[0] as usize] as u64
+    //             | ((codes[chunk[1] as usize] as u64) << n0)
+    //             | ((codes[chunk[2] as usize] as u64) << (n0 + n1))
+    //             | ((codes[chunk[3] as usize] as u64) << (n0 + n1 + n2));
+
+    //         let nbits = n0 + n1 + n2 + n3;
+    //         self.write_bits(bits, nbits, out_buf);
+
+    //         let n0 = lengths[chunk[4] as usize];
+    //         let n1 = lengths[chunk[5] as usize];
+    //         let n2 = lengths[chunk[6] as usize];
+    //         let n3 = lengths[chunk[7] as usize];
+
+    //         let bits = codes[chunk[4] as usize] as u64
+    //             | ((codes[chunk[5] as usize] as u64) << n0)
+    //             | ((codes[chunk[6] as usize] as u64) << (n0 + n1))
+    //             | ((codes[chunk[7] as usize] as u64) << (n0 + n1 + n2));
+
+    //         let nbits = n0 + n1 + n2 + n3;
+    //         self.write_bits(bits, nbits, out_buf);
+    //     }
+
+    //     if run > 0 {
+    //         self.write_run(run, lengths, codes, out_buf);
+    //     }
+
+    //     for &b in chunks.remainder() {
+    //         self.write_bits(codes[b as usize] as u64, lengths[b as usize], out_buf);
+    //     }
+    // }
+
+    pub fn new(writer: W) -> Self {
+        let codes = compute_codes(&HUFFMAN_LENGTHS);
+
+        Self {
+            buffer: 0,
+            nbits: 0,
+            bytes_written: 0,
+            codes,
+            lengths: HUFFMAN_LENGTHS,
+            writer,
+            checksum: Adler32::new(),
         }
     }
 
-    /// Returns (status, bytes_in, bytes_out)
-    pub fn compress(
-        &mut self,
-        in_buf: &[u8],
-        mut out_buf: &mut [u8],
-        _flush: Flush,
-    ) -> (Status, usize, usize) {
-        self.write_bits(0x0178, 16, &mut out_buf); // zlib header
+    pub fn write_headers(&mut self) -> io::Result<()> {
+        self.write_bits(0x0178, 16)?; // zlib header
 
-        self.write_bits(0b1, 1, &mut out_buf); // BFINAL
-        self.write_bits(0b10, 2, &mut out_buf); // Dynamic Huffman block
+        self.write_bits(0b1, 1)?; // BFINAL
+        self.write_bits(0b10, 2)?; // Dynamic Huffman block
 
-        self.write_bits((HUFFMAN_LENGTHS.len() - 257) as u64, 5, &mut out_buf); // # of length / literal codes
-        self.write_bits(0, 5, &mut out_buf); // 1 distance code
-        self.write_bits(15, 4, &mut out_buf); // 16 code length codes
+        self.write_bits((HUFFMAN_LENGTHS.len() - 257) as u64, 5)?; // # of length / literal codes
+        self.write_bits(0, 5)?; // 1 distance code
+        self.write_bits(15, 4)?; // 16 code length codes
 
         // Write code lengths for code length alphabet
         for _ in 0..3 {
-            self.write_bits(0, 3, &mut out_buf);
+            self.write_bits(0, 3)?;
         }
         for _ in 0..16 {
-            self.write_bits(4, 3, &mut out_buf);
+            self.write_bits(4, 3)?;
         }
 
         // Write code lengths for length/literal alphabet
         for &len in &HUFFMAN_LENGTHS {
-            self.write_bits((len.reverse_bits() >> 4) as u64, 4, &mut out_buf);
+            self.write_bits((len.reverse_bits() >> 4) as u64, 4)?;
         }
 
         // Write code lengths for distance alphabet
         for _ in 0..1 {
-            self.write_bits(0b1000, 4, &mut out_buf);
+            self.write_bits(0b1000, 4)?;
         }
 
-        // Write data
-        let codes = compute_codes(&HUFFMAN_LENGTHS);
-        self.compress_simple(in_buf, &HUFFMAN_LENGTHS, &codes, &mut out_buf);
+        Ok(())
+    }
 
+    pub fn write_data(&mut self, in_buf: &[u8]) -> io::Result<()> {
+        self.compress_simple(in_buf)
+    }
+
+    pub fn finish(mut self) -> io::Result<W> {
         // Write end of block
-        self.write_bits(codes[256] as u64, HUFFMAN_LENGTHS[256], &mut out_buf);
-        self.flush(&mut out_buf);
+        self.write_bits(self.codes[256] as u64, HUFFMAN_LENGTHS[256])?;
+        self.flush()?;
 
         // Write Adler32 checksum
-        let checksum: u32 = simd_adler32::adler32(&in_buf);
-        out_buf.write_all(checksum.to_be_bytes().as_ref()).unwrap();
+        let checksum: u32 = self.checksum.finish();
+        self.writer
+            .write_all(checksum.to_be_bytes().as_ref())
+            .unwrap();
         self.bytes_written += 4;
-
-        (Status::Done, in_buf.len(), self.bytes_written)
+        Ok(self.writer)
     }
 }
 
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
-    let mut compressor = Compressor::default();
-    let mut output = vec![0; ::core::cmp::max(1024 + input.len() * 2, 2)];
-
-    let mut in_pos = 0;
-    let mut out_pos = 0;
-    loop {
-        let (status, bytes_in, bytes_out) =
-            compressor.compress(&input[in_pos..], &mut output[out_pos..], Flush::Finish);
-
-        out_pos += bytes_out;
-        in_pos += bytes_in;
-
-        match status {
-            Status::Done => {
-                output.truncate(out_pos);
-                break;
-            }
-            Status::NeedMoreOutputSpace => {
-                // We need more space, so resize the vector.
-                if output.len().saturating_sub(out_pos) < 30 {
-                    output.resize(output.len() * 2, 0)
-                }
-            }
-        }
-    }
-
-    output.resize(out_pos, 0);
-    output
+    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4));
+    compressor.write_headers().unwrap();
+    compressor.write_data(input).unwrap();
+    compressor.finish().unwrap()
 }
 
 #[cfg(test)]
@@ -418,7 +532,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut data = vec![0; 1024 * 1024];
         for byte in &mut data {
-            *byte = (rng.gen_range::<u8, _>(0..16) * 2).wrapping_sub(16);
+            //*byte = (rng.gen_range::<u8, _>(0..16) * 2).wrapping_sub(16);
         }
         b.bytes = data.len() as u64;
         b.iter(|| compress_to_vec(&data));

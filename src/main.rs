@@ -10,9 +10,10 @@ fn main() {
     let mut run = 0u64;
     let mut pixel_run = 0u64;
 
-    let mut counts = [1u64; 286];
+    let mut counts = [0u64; 286];
+    let mut total_counts = [1u64; 286];
 
-    for (i, entry) in fs::read_dir("/home/jonathan/git/image-png/paeth")
+    for (i, entry) in fs::read_dir("/home/jonathan/git/image-png/rawdata2")
         .unwrap()
         .flatten()
         .enumerate()
@@ -51,7 +52,7 @@ fn main() {
                     counts[285] += 1;
                     current_run -= 258;
                 }
-                if current_run >= 3 {
+                if current_run >= 5 {
                     counts[fdeflate::LEN_SYM[current_run as usize - 3] as usize] += 1;
                 } else {
                     counts[0] += current_run as u64;
@@ -81,9 +82,16 @@ fn main() {
                 pixel_run += 9;
             }
         }
+
+        for i in 0..286 {
+            total_counts[i] += counts[i] /* * (1<<32) / raw.len() as u64*/;
+        }
+        counts = [0; 286];
     }
     println!();
     println!();
+
+    counts = total_counts;
 
     let mut lengths = vec![0; 286];
     fdeflate::compute_code_lengths(&counts, &[1; 286], &[12; 286], &mut lengths);
