@@ -3,7 +3,15 @@ name = "fdeflate"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT OR Apache-2.0"
+description = "Fast specialized deflate implementation"
+authors = ["The image-rs Developers"]
+
+# crates.io metadata
+documentation = "https://docs.rs/fdeflate"
+repository = "https://github.com/image-rs/fdeflate"
+homepage = "https://github.com/image-rs/fdeflate"
+categories = ["compression"]
 
 [dependencies]
 bytemuck = "1.12.3"
