@@ -14,8 +14,10 @@ extern crate test;
 
 mod tables;
 mod compress;
+mod decompress;
 
 pub use compress::{Compressor, compress_to_vec};
+pub use decompress::{Decompressor, decompress_to_vec};
 
 /// Build a length limited huffman tree.
 ///

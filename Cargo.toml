@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 bytemuck = "1.12.3"
-libmath = "0.2.1"
 simd-adler32 = "0.3.4"
 
 [dev-dependencies]
