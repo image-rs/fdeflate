@@ -90,6 +90,9 @@ impl Decompressor {
     }
 
     fn parse_header(&mut self, input: &[u8]) -> Result<usize, DecompressionError> {
+        if input.len() < 5 {
+            return Err(DecompressionError::CorruptData);
+        }
         let mut block = &input[2..];
 
         // Validate zlib header follows PNG requirements.
@@ -125,7 +128,9 @@ impl Decompressor {
         // Read code length code lengths.
         let mut code_length_lengths = [0; 19];
         for i in 0..hclen {
-            code_length_lengths[CLCL_ORDER[i]] = self.read_bits(3, &mut block).unwrap() as u8;
+            code_length_lengths[CLCL_ORDER[i]] =
+                self.read_bits(3, &mut block)
+                    .ok_or(DecompressionError::CorruptData)? as u8;
         }
         if code_length_lengths[16..] != [0; 3] || code_length_lengths[..16] != [4; 16] {
             return Err(DecompressionError::NotFDeflate);
@@ -136,7 +141,9 @@ impl Decompressor {
         // Read literal/length code lengths.
         let mut lengths = [0; 286];
         for i in 0..hlit {
-            let code = self.read_bits(4, &mut block).unwrap() as u8;
+            let code = self
+                .read_bits(4, &mut block)
+                .ok_or(DecompressionError::CorruptData)? as u8;
             lengths[i] = code_length_codes[code as usize] as u8;
         }
         if lengths[0] == 0 || lengths.iter().any(|&l| l > 12) {
@@ -144,7 +151,10 @@ impl Decompressor {
         }
 
         // Read distance code lengths.
-        let distance = code_length_codes[self.read_bits(4, &mut block).unwrap() as usize];
+        let distance = code_length_codes[self
+            .read_bits(4, &mut block)
+            .ok_or(DecompressionError::CorruptData)?
+            as usize];
         if distance != 1 {
             return Err(DecompressionError::NotFDeflate);
         }
@@ -219,6 +229,10 @@ impl Decompressor {
 
         if !self.read_header {
             if input.len() < MAX_HEADER_BYTES && !end_of_input {
+                return Ok((0, 0));
+            }
+            if end_of_input && input.is_empty() {
+                self.done = true;
                 return Ok((0, 0));
             }
             let consumed = self.parse_header(input)?;
