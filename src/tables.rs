@@ -20,7 +20,7 @@ pub(crate) const HUFFMAN_LENGTHS: [u8; 286] = [
 pub(crate) const HUFFMAN_CODES: [u16; 286] = crate::compute_codes(&HUFFMAN_LENGTHS);
 
 /// Length code for length values (derived from deflate spec).
-pub(crate) const LEN_SYM: [u16; 256] = [
+pub(crate) const LENGTH_TO_SYMBOL: [u16; 256] = [
     257, 258, 259, 260, 261, 262, 263, 264, 265, 265, 266, 266, 267, 267, 268, 268, 269, 269, 269,
     269, 270, 270, 270, 270, 271, 271, 271, 271, 272, 272, 272, 272, 273, 273, 273, 273, 273, 273,
     273, 273, 274, 274, 274, 274, 274, 274, 274, 274, 275, 275, 275, 275, 275, 275, 275, 275, 276,
@@ -38,7 +38,7 @@ pub(crate) const LEN_SYM: [u16; 256] = [
 ];
 
 /// Number of extra bits for length values (derived from deflate spec).
-pub(crate) const LEN_EXTRA: [u8; 256] = [
+pub(crate) const LENGTH_TO_LEN_EXTRA: [u8; 256] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
     3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
@@ -60,12 +60,12 @@ pub(crate) const CLCL_ORDER: [usize; 19] = [
 ];
 
 /// Number of extra bits for each length code (derived from deflate spec).
-pub(crate) const LEN_BITS: [u8; 29] = [
+pub(crate) const LEN_SYM_TO_LEN_EXTRA: [u8; 29] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 ];
 
 /// The base length for each length code (derived from deflate spec).
-pub(crate) const LEN_BASE: [usize; 29] = [
+pub(crate) const LEN_SYM_TO_LEN_BASE: [usize; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
     163, 195, 227, 258,
 ];

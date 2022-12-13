@@ -12,12 +12,12 @@
 #![feature(test)]
 extern crate test;
 
-mod tables;
 mod compress;
 mod decompress;
+mod tables;
 
-pub use compress::{Compressor, compress_to_vec};
-pub use decompress::{Decompressor, decompress_to_vec};
+pub use compress::{compress_to_vec, Compressor};
+pub use decompress::{decompress_to_vec, Decompressor};
 
 /// Build a length limited huffman tree.
 ///

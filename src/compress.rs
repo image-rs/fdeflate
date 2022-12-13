@@ -4,7 +4,9 @@ use std::{
     io::{self, Write},
 };
 
-use crate::tables::{BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LEN_EXTRA, LEN_SYM};
+use crate::tables::{
+    BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
+};
 
 pub struct Compressor<W: Write> {
     checksum: Adler32,
@@ -52,10 +54,10 @@ impl<W: Write> Compressor<W> {
         }
 
         if run > 4 {
-            let sym = LEN_SYM[run as usize - 3] as usize;
+            let sym = LENGTH_TO_SYMBOL[run as usize - 3] as usize;
             self.write_bits(HUFFMAN_CODES[sym] as u64, HUFFMAN_LENGTHS[sym])?;
 
-            let len_extra = LEN_EXTRA[run as usize - 3];
+            let len_extra = LENGTH_TO_LEN_EXTRA[run as usize - 3];
             let extra = ((run - 3) & BITMASKS[len_extra as usize]) as u64;
             self.write_bits(extra, len_extra + 1)?;
         } else {

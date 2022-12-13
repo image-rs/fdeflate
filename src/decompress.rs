@@ -2,7 +2,7 @@ use std::convert::TryInto;
 
 use simd_adler32::Adler32;
 
-use crate::tables::{CLCL_ORDER, LEN_BITS, LEN_BASE};
+use crate::tables::{CLCL_ORDER, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA};
 
 const MAX_HEADER_BYTES: usize = 289;
 
@@ -347,10 +347,10 @@ impl Decompressor {
                     break;
                 }
 
-                let length_bits = LEN_BITS[symbol - 257];
+                let length_bits = LEN_SYM_TO_LEN_EXTRA[symbol - 257];
                 let bits =
                     self.peak_bits(length_bits + advance_input_bits + 1) >> advance_input_bits;
-                let length = LEN_BASE[symbol - 257] + bits as usize;
+                let length = LEN_SYM_TO_LEN_BASE[symbol - 257] + bits as usize;
 
                 // Zero is the only valid distance code (corresponding to a distance of 1 byte).
                 if (bits >> length_bits) != 0 {
@@ -441,7 +441,7 @@ pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tables::{LEN_EXTRA, LEN_SYM};
+    use crate::tables::{LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL};
 
     use super::*;
     use rand::Rng;
@@ -454,14 +454,20 @@ mod tests {
 
     #[test]
     fn tables() {
-        for (i, &bits) in LEN_BITS.iter().enumerate() {
-            let len_base = LEN_BASE[i];
+        for (i, &bits) in LEN_SYM_TO_LEN_EXTRA.iter().enumerate() {
+            let len_base = LEN_SYM_TO_LEN_BASE[i];
             for j in 0..(1 << bits) {
                 if i == 27 && j == 31 {
                     continue;
                 }
-                assert_eq!(LEN_EXTRA[len_base + j - 3], bits, "{} {}", i, j);
-                assert_eq!(LEN_SYM[len_base + j - 3], i as u16 + 257, "{} {}", i, j);
+                assert_eq!(LENGTH_TO_LEN_EXTRA[len_base + j - 3], bits, "{} {}", i, j);
+                assert_eq!(
+                    LENGTH_TO_SYMBOL[len_base + j - 3],
+                    i as u16 + 257,
+                    "{} {}",
+                    i,
+                    j
+                );
             }
         }
     }
