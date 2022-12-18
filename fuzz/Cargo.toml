@@ -10,7 +10,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-flate2 = { version = "1.0", features = ["zlib"] }
+flate2 = { version = "1.0", features = [] }
+miniz_oxide = { version = "0.6", features = ["std"] }
 
 [dependencies.fdeflate]
 path = ".."

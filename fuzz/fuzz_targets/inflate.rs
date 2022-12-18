@@ -1,30 +1,29 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
+use miniz_oxide::inflate::TINFLStatus;
 use std::io::{Cursor, Read};
 
 fuzz_target!(|input: &[u8]| {
-    let mut decompressed = vec![0; input.len() * 2 + 2];
-    let mut decompressor = fdeflate::Decompressor::new();
+    if input.is_empty() {
+        return;
+    }
 
-    match decompressor.read(&input, &mut decompressed, true) {
-        Ok(n) => {
-            assert!(decompressor.done());
-            let mut decompressed2 = Vec::new();
-            flate2::bufread::ZlibDecoder::new(Cursor::new(&input))
-                .read_to_end(&mut decompressed2)
-                .unwrap();
-            assert_eq!(decompressed[..n.1], decompressed2);
-        }
-        Err(fdeflate::DecompressionError::CorruptData) => {
-            match flate2::Decompress::new(true).decompress_vec(
-                &input,
-                &mut Vec::with_capacity(input.len() * 2 + 2),
-                flate2::FlushDecompress::Finish,
-            ) {
-                Ok(flate2::Status::BufError) | Err(_) => {}
-                r => panic!("{:?}", r),
-            }
+    match fdeflate::decompress_to_vec(&input) {
+        Ok(decompressed) => {
+            let decompressed2 = miniz_oxide::inflate::decompress_to_vec_zlib(&input).unwrap();
+            assert_eq!(decompressed, decompressed2);
         }
         Err(fdeflate::DecompressionError::NotFDeflate) => {}
+        Err(fdeflate::DecompressionError::InvalidHlit) => {
+            // TODO: Remove once https://github.com/Frommi/miniz_oxide/issues/130 is fixed.
+        }
+        Err(err) => match miniz_oxide::inflate::decompress_to_vec_zlib(&input) {
+            Err(r)
+                if r.status == TINFLStatus::Failed
+                    || r.status == TINFLStatus::FailedCannotMakeProgress => {}
+            r => {
+                panic!("fdeflate: {:?}, miniz_oxide: {:?}", err, r)
+            }
+        },
     }
 });
