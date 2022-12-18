@@ -8,15 +8,15 @@
 //! - No distance codes except for run length encoding of zeros.
 //! - A single fixed huffman tree trained on a large corpus of PNG images.
 
-#![feature(test)]
-extern crate test;
+#![cfg_attr(test, feature(test))]
+#[cfg(test)] extern crate test;
 
 mod compress;
 mod decompress;
 mod tables;
 
 pub use compress::{compress_to_vec, Compressor};
-pub use decompress::{decompress_to_vec, Decompressor, DecompressionError};
+pub use decompress::{decompress_to_vec, DecompressionError, Decompressor};
 
 /// Build a length limited huffman tree.
 ///
@@ -82,7 +82,7 @@ pub fn compute_code_lengths(
     }
 }
 
-const fn compute_codes<const NSYMS: usize>(lengths: &[u8; NSYMS]) -> [u16; NSYMS] {
+const fn compute_codes<const NSYMS: usize>(lengths: &[u8; NSYMS]) -> Option<[u16; NSYMS]> {
     let mut codes = [0u16; NSYMS];
 
     let mut code = 0u32;
@@ -101,9 +101,9 @@ const fn compute_codes<const NSYMS: usize>(lengths: &[u8; NSYMS]) -> [u16; NSYMS
         len += 1;
     }
 
-    if code != 2 << 16 {
-        panic!("Invalid Huffman code lengths");
+    if code == 2 << 16 {
+        Some(codes)
+    } else {
+        None
     }
-
-    codes
 }

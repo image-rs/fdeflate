@@ -17,7 +17,10 @@ pub(crate) const HUFFMAN_LENGTHS: [u8; 286] = [
     12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 9,
 ];
 
-pub(crate) const HUFFMAN_CODES: [u16; 286] = crate::compute_codes(&HUFFMAN_LENGTHS);
+pub(crate) const HUFFMAN_CODES: [u16; 286] = match crate::compute_codes(&HUFFMAN_LENGTHS) {
+    Some(codes) => codes,
+    None => panic!("HUFFMAN_LENGTHS is invalid"),
+};
 
 /// Length code for length values (derived from deflate spec).
 pub(crate) const LENGTH_TO_SYMBOL: [u16; 256] = [
