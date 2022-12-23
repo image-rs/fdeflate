@@ -60,7 +60,9 @@ impl Decompressor {
     }
 
     fn fill_buffer(&mut self, input: &mut &[u8]) {
-        if input.len() >= 8 {
+        if self.nbits == 64 {
+            /* do nothing */
+        } else if input.len() >= 8 {
             self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << self.nbits;
             *input = &mut &input[(63 - self.nbits as usize) / 8..];
             self.nbits |= 56;
@@ -113,7 +115,7 @@ impl Decompressor {
         }
 
         // If FDICT is set, bail out and let the caller use a full zlib implementation.
-        if block[1] & 0x20 != 0 {
+        if input[1] & 0x20 != 0 {
             return Err(DecompressionError::NotFDeflate);
         }
 
