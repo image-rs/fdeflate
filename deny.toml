@@ -10,7 +10,9 @@ ignore = []
 multiple-versions = "deny"
 deny = []
 skip = []
-skip-tree = []
+skip-tree = [
+    { name = "criterion" },  # dev-dependency
+]
 
 [licenses]
 unlicensed = "allow"
