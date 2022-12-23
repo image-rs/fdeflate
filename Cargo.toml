@@ -3,6 +3,9 @@ name = "fdeflate"
 version = "0.1.0"
 edition = "2021"
 
+# note: when changed, also update test runner in `.github/workflows/rust.yml`
+rust-version = "1.61.0"
+
 license = "MIT OR Apache-2.0"
 description = "Fast specialized deflate implementation"
 authors = ["The image-rs Developers"]
