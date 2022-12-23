@@ -433,7 +433,7 @@ impl Decompressor {
                     self.consume_bits(align_bits);
                 }
                 #[cfg(not(fuzzing))]
-                if self.peak_bits(32) as u32 != self.checksum.finish().to_be() {
+                if (self.peak_bits(32) as u32).swap_bytes() != self.checksum.finish() {
                     return Err(DecompressionError::WrongChecksum);
                 }
                 self.state = State::Done;
