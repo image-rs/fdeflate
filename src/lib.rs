@@ -8,9 +8,6 @@
 //! - No distance codes except for run length encoding of zeros.
 //! - A single fixed huffman tree trained on a large corpus of PNG images.
 
-#![cfg_attr(test, feature(test))]
-#[cfg(test)] extern crate test;
-
 mod compress;
 mod decompress;
 mod tables;
