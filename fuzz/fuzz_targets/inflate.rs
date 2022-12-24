@@ -1,7 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use miniz_oxide::inflate::TINFLStatus;
-use std::io::{Cursor, Read};
 
 fuzz_target!(|input: &[u8]| {
     if input.is_empty() {

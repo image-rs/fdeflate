@@ -1,7 +1,7 @@
 use simd_adler32::Adler32;
 use std::{
     convert::TryInto,
-    io::{self, Write},
+    io::{self, Seek, SeekFrom, Write},
 };
 
 use crate::tables::{
@@ -68,16 +68,18 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
-    pub fn new(writer: W) -> Self {
-        Self {
+    pub fn new(writer: W) -> io::Result<Self> {
+        let mut compressor = Self {
             checksum: Adler32::new(),
             buffer: 0,
             nbits: 0,
             writer,
-        }
+        };
+        compressor.write_headers()?;
+        Ok(compressor)
     }
 
-    pub fn write_headers(&mut self) -> io::Result<()> {
+    fn write_headers(&mut self) -> io::Result<()> {
         self.write_bits(0x0178, 16)?; // zlib header
 
         self.write_bits(0b1, 1)?; // BFINAL
@@ -197,9 +199,81 @@ impl<W: Write> Compressor<W> {
     }
 }
 
+pub struct StoredOnlyCompressor<W> {
+    writer: W,
+    checksum: Adler32,
+    block_bytes: u16,
+}
+impl<W: Write + Seek> StoredOnlyCompressor<W> {
+    /// Creates a new `StoredOnlyCompressor` that writes to the given writer.
+    pub fn new(mut writer: W) -> io::Result<Self> {
+        writer.write_all(&[0x78, 0x01])?; // zlib header
+        writer.write_all(&[0; 5])?; // placeholder stored block header
+
+        Ok(Self {
+            writer,
+            checksum: Adler32::new(),
+            block_bytes: 0,
+        })
+    }
+
+    fn set_block_header(&mut self, size: u16, last: bool) -> io::Result<()> {
+        self.writer.seek(SeekFrom::Current(-(size as i64 + 5)))?;
+        self.writer.write_all(&[
+            last as u8,
+            (size & 0xFF) as u8,
+            ((size >> 8) & 0xFF) as u8,
+            (!size & 0xFF) as u8,
+            ((!size >> 8) & 0xFF) as u8,
+        ])?;
+        self.writer.seek(SeekFrom::Current(size as i64))?;
+
+        Ok(())
+    }
+
+    /// Writes the given data to the underlying writer.
+    pub fn write_data(&mut self, mut data: &[u8]) -> io::Result<()> {
+        self.checksum.write(data);
+        while !data.is_empty() {
+            if self.block_bytes == u16::MAX {
+                self.set_block_header(u16::MAX, false)?;
+                self.writer.write_all(&[0; 5])?; // placeholder stored block header
+                self.block_bytes = 0;
+            }
+
+            let prefix_bytes = data.len().min((u16::MAX - self.block_bytes) as usize);
+            self.writer.write_all(&data[..prefix_bytes])?;
+            self.block_bytes += prefix_bytes as u16;
+            data = &data[prefix_bytes..];
+        }
+
+        Ok(())
+    }
+
+    /// Finish writing the final block and return the underlying writer.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.set_block_header(self.block_bytes, true)?;
+
+        // Write Adler32 checksum
+        let checksum: u32 = self.checksum.finish();
+        self.writer
+            .write_all(checksum.to_be_bytes().as_ref())
+            .unwrap();
+
+        Ok(self.writer)
+    }
+}
+impl<W> StoredOnlyCompressor<W> {
+    /// Return the number of bytes that will be written to the output stream
+    /// for the given input size. Because this compressor only writes stored blocks,
+    /// the output size is always slightly *larger* than the input size.
+    pub fn compressed_size(raw_size: usize) -> usize {
+        (raw_size.saturating_sub(1) / u16::MAX as usize + 1) * (u16::MAX as usize + 5) + 6
+    }
+}
+
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
-    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4));
-    compressor.write_headers().unwrap();
+    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
     compressor.write_data(input).unwrap();
     compressor.finish().unwrap()
 }
