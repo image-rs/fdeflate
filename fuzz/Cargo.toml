@@ -27,6 +27,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "stored"
+path = "fuzz_targets/stored.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "inflate"
 path = "fuzz_targets/inflate.rs"
 test = false
