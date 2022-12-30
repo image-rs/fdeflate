@@ -280,7 +280,9 @@ impl<W> StoredOnlyCompressor<W> {
     /// for the given input size. Because this compressor only writes stored blocks,
     /// the output size is always slightly *larger* than the input size.
     pub fn compressed_size(raw_size: usize) -> usize {
-        (raw_size.saturating_sub(1) / u16::MAX as usize + 1) * (u16::MAX as usize + 5) + 6
+        (raw_size.saturating_sub(1) / u16::MAX as usize) * (u16::MAX as usize + 5)
+            + (raw_size % u16::MAX as usize + 5)
+            + 6
     }
 }
 
