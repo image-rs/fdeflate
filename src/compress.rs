@@ -8,6 +8,7 @@ use crate::tables::{
     BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
 };
 
+/// Compressor that produces fdeflate compressed streams.
 pub struct Compressor<W: Write> {
     checksum: Adler32,
     buffer: u64,
@@ -68,6 +69,7 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
+    /// Create a new Compressor.
     pub fn new(writer: W) -> io::Result<Self> {
         let mut compressor = Self {
             checksum: Adler32::new(),
@@ -110,6 +112,7 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
+    /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
         self.checksum.write(data);
 
@@ -185,6 +188,7 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
+    /// Write the remainder of the stream and return the inner writer.
     pub fn finish(mut self) -> io::Result<W> {
         // Write end of block
         self.write_bits(HUFFMAN_CODES[256] as u64, HUFFMAN_LENGTHS[256])?;
@@ -199,6 +203,14 @@ impl<W: Write> Compressor<W> {
     }
 }
 
+/// Specialized compressor that only supports the stored blocks.
+///
+/// This is useful for writing files that are not compressed, but still need to be wrapped in a
+/// zlib stream.
+///
+/// NOTE: This crate cannot currently decompress stream compressed with this method and attempting
+/// to do so will result in
+/// [`DecompressionError::NotFDeflate`](enum.DecompressionError.html#variant.NotFDeflate).
 pub struct StoredOnlyCompressor<W> {
     writer: W,
     checksum: Adler32,
@@ -272,6 +284,7 @@ impl<W> StoredOnlyCompressor<W> {
     }
 }
 
+/// Compresses the given data using the zlib format.
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
     let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
     compressor.write_data(input).unwrap();

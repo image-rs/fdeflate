@@ -11,11 +11,17 @@ pub enum DecompressionError {
     /// Data cannot be decompressed with fdeflate, but may still be valid. The caller should
     /// fallback to a full zlib implementation.
     NotFDeflate,
+    /// All input was consumed, but the end of the stream hasn't been reached.
     InsufficientInput,
+    /// Too many literals were specified.
     InvalidHlit,
+    /// The stream doesn't specify a valid huffman tree.
     BadHuffmanTree,
+    /// The stream contains a distance code that was not allowed by the header.
     InvalidDistanceCode,
+    /// The stream contains contains back-reference as the first symbol.
     InputStartsWithRun,
+    /// The deflate stream checksum is incorrect.
     WrongChecksum,
 }
 
@@ -27,6 +33,7 @@ enum State {
     Done,
 }
 
+/// Decompressor that reads fdeflate compressed streams.
 pub struct Decompressor {
     buffer: u64,
     nbits: u8,
@@ -45,6 +52,7 @@ pub struct Decompressor {
 }
 
 impl Decompressor {
+    /// Create a new decompressor.
     pub fn new() -> Self {
         Self {
             buffer: 0,
@@ -236,6 +244,16 @@ impl Decompressor {
         Ok(input.len() - input_left)
     }
 
+    /// Decompresses a chunk of data.
+    ///
+    /// Returns the number of bytes read from `input` and the number of bytes written to `output`,
+    /// or an error if the deflate stream is not valid. `input` is the compressed data. `output`
+    /// is the buffer to write the decompressed data to. `end_of_input` indicates whether more
+    /// data may be available in the future.
+    ///
+    /// If the stream is not in fdflate format, `NotFDeflate` is guaranteed to be returned *before
+    /// consuming any input*. At this point, the same data should be passed to a full zlib
+    /// implementation to decompress it.
     pub fn read(
         &mut self,
         input: &[u8],
@@ -452,11 +470,14 @@ impl Decompressor {
         }
     }
 
+    /// Returns true if the decompressor has finished decompressing the input.
     pub fn done(&self) -> bool {
         self.state == State::Done
     }
 }
 
+/// Decompresses the given input. Returns an error if the input is invalid or if the data is not
+/// compressed with the fdeflate algorithm.
 pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
     let mut decoder = Decompressor::new();
     let mut output = vec![0; 1024];
