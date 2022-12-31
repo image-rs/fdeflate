@@ -9,6 +9,8 @@
 //! - A single fixed huffman tree trained on a large corpus of PNG images.
 //! - All huffman codes are 12 bits or less.
 
+#![forbid(unsafe_code)]
+
 mod compress;
 mod decompress;
 mod tables;
