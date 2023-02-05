@@ -2,7 +2,10 @@ use std::convert::TryInto;
 
 use simd_adler32::Adler32;
 
-use crate::tables::{CLCL_ORDER, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA};
+use crate::tables::{
+    CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, LEN_SYM_TO_LEN_BASE,
+    LEN_SYM_TO_LEN_EXTRA,
+};
 
 const MAX_HEADER_BYTES: usize = 289;
 
@@ -21,6 +24,8 @@ pub enum DecompressionError {
     InvalidDistanceCode,
     /// The stream contains contains back-reference as the first symbol.
     InputStartsWithRun,
+    /// The stream contains a back-reference that is too far back.
+    DistanceTooFarBack,
     /// The deflate stream checksum is incorrect.
     WrongChecksum,
 }
@@ -39,7 +44,17 @@ pub struct Decompressor {
     nbits: u8,
     bits_read: u64,
     data_table: [[u8; 2]; 4096],
+    /// 0b000y_yyyy_yyyy_xxxx     x = input_advance_bits, y = output_advance_bytes
+    /// 0b000y_yyyy_xxxx_0000     x = input_advance_bits, y = symbol-256
+    /// 0b1xxx_xxxx_xxxx_0000     x = secondary table index
     advance_table: [u16; 4096],
+    /// 0b000y_yyyy_yyyy_xxxx     x = input_advance_bits, y = symbol
+    secondary_table: Vec<u16>,
+
+    dist_table: [u8; 256],
+    dist_symbol_lengths: [u8; 30],
+    dist_symbol_masks: [u16; 30],
+    dist_symbol_codes: [u16; 30],
 
     state: State,
 
@@ -60,6 +75,11 @@ impl Decompressor {
             bits_read: 0,
             data_table: [[0; 2]; 4096],
             advance_table: [u16::MAX; 4096],
+            secondary_table: Vec::new(),
+            dist_table: [0; 256],
+            dist_symbol_lengths: [0; 30],
+            dist_symbol_masks: [0; 30],
+            dist_symbol_codes: [0xffff; 30],
             queued_output: None,
             last: None,
             checksum: Adler32::new(),
@@ -166,9 +186,6 @@ impl Decompressor {
                 .ok_or(DecompressionError::InsufficientInput)? as u8;
             lengths[i] = code_length_codes[code as usize] as u8;
         }
-        if lengths[0] == 0 || lengths.iter().any(|&l| l > 12) {
-            return Err(DecompressionError::NotFDeflate);
-        }
 
         // Read distance code lengths.
         let distance = code_length_codes[self
@@ -178,6 +195,10 @@ impl Decompressor {
         if distance != 1 {
             return Err(DecompressionError::NotFDeflate);
         }
+
+        self.dist_symbol_masks[0] = 0x1;
+        self.dist_symbol_lengths[0] = 1;
+        self.dist_symbol_codes[0] = 0;
 
         // Build the literal/length code table.
         let codes = crate::compute_codes(&lengths).ok_or(DecompressionError::BadHuffmanTree)?;
@@ -190,7 +211,8 @@ impl Decompressor {
             let code = codes[i];
             let length = lengths[i];
             let mut j = code;
-            while j < 4096 && length != 0 {
+
+            while j < 4096 && length != 0 && length <= 12 {
                 let extra_length = if use_extra_length {
                     ((j | 0xf000) >> length).trailing_zeros() as u8 / lengths[0]
                 } else {
@@ -231,12 +253,40 @@ impl Decompressor {
         for i in 256..hlit {
             let code = codes[i];
             let length = lengths[i];
-            if length != 0 {
+            if length != 0 && length <= 12 {
                 let mut j = code;
                 while j < 4096 && length != 0 {
                     self.advance_table[j as usize] = (i as u16 - 256) << 8 | (length as u16) << 4;
                     j += 1 << length;
                 }
+            }
+        }
+
+        let mut secondary_table_len = 0;
+        for i in 0..hlit {
+            if lengths[i] > 12 {
+                let j = (codes[i] & 0xfff) as usize;
+                if self.advance_table[j] == u16::MAX {
+                    self.advance_table[j] = (secondary_table_len << 4) | 0x8000;
+                    secondary_table_len += 8;
+                }
+            }
+        }
+        self.secondary_table = vec![0; secondary_table_len as usize];
+        for i in 0..hlit {
+            let code = codes[i];
+            let length = lengths[i];
+            if length > 12 {
+                let j = (codes[i] & 0xfff) as usize;
+                let k = (self.advance_table[j] & 0x7fff) >> 4;
+
+                let mut s = code >> 12;
+                while s < 8 {
+                    self.secondary_table[k as usize + s as usize] =
+                        ((i as u16) << 4) | length as u16;
+                    s += 1 << (length - 12);
+                }
+                self.secondary_table[k as usize] = i as u16;
             }
         }
 
@@ -258,13 +308,14 @@ impl Decompressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
+        output_position: usize,
         end_of_input: bool,
     ) -> Result<(usize, usize), DecompressionError> {
-        assert!(output.len() >= 2);
-        debug_assert!(output.iter().all(|&b| b == 0));
+        assert!(output.len() >= output_position + 2);
+        debug_assert!(output[output_position..].iter().all(|&b| b == 0));
 
         let mut remaining_input = &input[..];
-        let mut output_index = 0;
+        let mut output_index = output_position;
 
         if let State::Done = self.state {
             return Ok((0, 0));
@@ -280,17 +331,19 @@ impl Decompressor {
         }
 
         if let Some((data, len)) = self.queued_output {
-            let n = output.len().min(len);
+            let n = len.min(output.len() - output_index);
             if data != 0 {
-                output[..n].fill(data);
+                output[output_index..][..n].fill(data);
             }
-            debug_assert_eq!(output_index, 0);
             output_index += n;
             self.queued_output = if n < len { Some((data, len - n)) } else { None };
         }
 
+        // Main decoding loop
         while let State::Data = self.state {
             self.fill_buffer(&mut remaining_input);
+
+            // Ultra-fast path: do 4 consecutive table lookups and bail if any of them need the slow path.
             if self.nbits >= 48 {
                 let bits = self.peak_bits(48);
                 let advance0 = self.advance_table[(bits & 0xfff) as usize];
@@ -357,7 +410,7 @@ impl Decompressor {
                 }
             }
 
-            if self.nbits < 18 {
+            if self.nbits < 15 {
                 break;
             }
 
@@ -368,6 +421,8 @@ impl Decompressor {
             let advance_input_bits = (advance & 0x0f) as u8;
             let advance_output_bytes = (advance >> 4) as usize;
 
+            // Fast path: if the next symbol is <= 12 bits and a literal, the table specifies the
+            // output bytes and we can directly write them to the output buffer.
             if advance_input_bits > 0 {
                 if output_index + 1 < output.len() {
                     output[output_index] = data[0];
@@ -379,6 +434,8 @@ impl Decompressor {
                         self.queued_output = Some((0, output_index - output.len()));
                         output_index = output.len();
                         break;
+                    } else {
+                        continue;
                     }
                 } else if output_index + advance_output_bytes == output.len() {
                     debug_assert_eq!(advance_output_bytes, 1);
@@ -389,27 +446,46 @@ impl Decompressor {
                 } else {
                     break;
                 }
+            }
+
+            // Slow path: the next symbol is a length symbol and/or is more than 12 bits.
+            let (litlen_code_bits, litlen_symbol) = if advance & 0x8000 == 0 {
+                (
+                    (advance_output_bytes & 0x0f) as u8,
+                    256 + (advance_output_bytes >> 4) as usize,
+                )
             } else {
-                let advance_input_bits = (advance_output_bytes & 0x0f) as u8;
-                let symbol = 256 + (advance_output_bytes >> 4) as usize;
+                let next3 = self.peak_bits(15) >> 12;
+                let secondary_index = (advance & 0x7fff) >> 4;
+                let secondary = self.secondary_table[secondary_index as usize + next3 as usize];
+                ((secondary & 0xf) as u8, (secondary >> 4) as usize)
+            };
 
-                // Check for end of input symbol.
-                if symbol == 256 {
-                    self.consume_bits(advance_input_bits);
-                    self.state = State::Checksum;
-                    break;
-                }
+            if litlen_symbol < 256 {
+                // literal
+                output[output_index] = litlen_symbol as u8;
+                output_index += 1;
+                self.consume_bits(litlen_code_bits);
+                continue;
+            } else if litlen_symbol == 256 {
+                // end of block
+                self.consume_bits(litlen_code_bits);
+                self.state = State::Checksum;
+                break;
+            }
 
-                let length_bits = LEN_SYM_TO_LEN_EXTRA[symbol - 257];
-                let bits =
-                    self.peak_bits(length_bits + advance_input_bits + 1) >> advance_input_bits;
-                let length = LEN_SYM_TO_LEN_BASE[symbol - 257] + bits as usize;
+            let length_extra_bits = LEN_SYM_TO_LEN_EXTRA[litlen_symbol - 257];
+            if self.nbits < length_extra_bits + litlen_code_bits + 28 {
+                break;
+            }
 
-                // Zero is the only valid distance code (corresponding to a distance of 1 byte).
-                if (bits >> length_bits) != 0 {
-                    return Err(DecompressionError::InvalidDistanceCode);
-                }
+            let bits =
+                self.peak_bits(length_extra_bits + litlen_code_bits + 15) >> litlen_code_bits;
+            let length_code = bits & ((1 << length_extra_bits) - 1);
+            let dist_code = ((bits >> length_extra_bits) & 0x7fff) as u16;
+            let length = LEN_SYM_TO_LEN_BASE[litlen_symbol - 257] + length_code as usize;
 
+            if dist_code & self.dist_symbol_masks[0] == self.dist_symbol_codes[0] {
                 let last = if output_index > 0 {
                     output[output_index - 1]
                 } else if let Some(last) = self.last {
@@ -418,7 +494,9 @@ impl Decompressor {
                     return Err(DecompressionError::InputStartsWithRun);
                 };
 
-                self.consume_bits(length_bits + advance_input_bits + 1);
+                self.consume_bits(
+                    length_extra_bits + litlen_code_bits + self.dist_symbol_lengths[0],
+                );
 
                 // fdeflate only writes runs of zeros, but handling non-zero runs isn't hard and
                 // it is too late to bail now.
@@ -436,11 +514,45 @@ impl Decompressor {
                 } else {
                     output_index += length;
                 }
+            } else {
+                let mut dist_symbol = 0;
+                for j in self.dist_table[dist_code as usize & 0xFF] as usize..30 {
+                    if dist_code & self.dist_symbol_masks[j] == self.dist_symbol_codes[j] {
+                        dist_symbol = j;
+                        break;
+                    }
+                }
+                if dist_symbol == 0 {
+                    return Err(DecompressionError::InvalidDistanceCode);
+                }
+
+                let dist_code_bits = self.dist_symbol_lengths[dist_symbol];
+                let dist_extra_bits = DIST_SYM_TO_DIST_EXTRA[dist_symbol];
+                let dist_extra_mask = (1 << dist_extra_bits) - 1;
+                let dist = DIST_SYM_TO_DIST_BASE[dist_symbol] as usize
+                    + ((bits >> (length_extra_bits + dist_code_bits)) & dist_extra_mask) as usize;
+
+                if dist > output_index {
+                    return Err(DecompressionError::DistanceTooFarBack);
+                }
+
+                if output_index + length > output.len() {
+                    break;
+                }
+
+                output.copy_within(
+                    (output_index - dist)..(output_index - dist + length),
+                    output_index,
+                );
+                output_index += length;
+                self.consume_bits(
+                    litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits,
+                );
             }
         }
 
         // self.data.extend_from_slice(&output[..output_index]);
-        self.checksum.write(&output[..output_index]);
+        self.checksum.write(&output[output_position..output_index]);
 
         if let State::Checksum = self.state {
             self.fill_buffer(&mut remaining_input);
@@ -464,7 +576,7 @@ impl Decompressor {
                 self.last = Some(output[output_index - 1])
             }
             let input_left = remaining_input.len();
-            Ok((input.len() - input_left, output_index))
+            Ok((input.len() - input_left, output_index - output_position))
         } else {
             Err(DecompressionError::InsufficientInput)
         }
@@ -485,7 +597,7 @@ pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
     let mut output_index = 0;
     while !decoder.done() {
         let (consumed, produced) =
-            decoder.read(&input[input_index..], &mut output[output_index..], true)?;
+            decoder.read(&input[input_index..], &mut output, output_index, true)?;
         input_index += consumed;
         output_index += produced;
         output.resize(output_index + 32 * 1024, 0);
