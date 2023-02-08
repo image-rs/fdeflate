@@ -214,15 +214,12 @@ impl Decompressor {
                     return Err(DecompressionError::InvalidUncompressedBlockLength);
                 }
 
-                // println!("header uncompressed last={} {len}", self.last_block);
-
                 self.state = State::UncompressedData;
                 self.uncompressed_bytes_left = len;
                 self.consume_bits(header_bits);
                 return Ok(());
             }
             0b01 => {
-                // println!("header fixed last={}", self.last_block);
                 self.consume_bits(3);
                 // TODO: Do this statically rather than every time.
                 self.header.hlit = 288;
@@ -233,7 +230,6 @@ impl Decompressor {
                 return Ok(());
             }
             0b10 => {
-                // println!("header dynamic last={}", self.last_block);
                 if self.nbits < 17 {
                     return Ok(());
                 }
@@ -274,6 +270,7 @@ impl Decompressor {
                 }
 
                 self.state = State::CodeLengths;
+                self.header.num_lengths_read = 0;
                 return Ok(());
             }
             0b11 => return Err(DecompressionError::InvalidBlockType),
@@ -381,6 +378,7 @@ impl Decompressor {
                 };
 
                 self.compression.data_table[j as usize][0] = i as u8;
+                self.compression.data_table[j as usize][1] = 0;
                 self.compression.advance_table[j as usize] =
                     ((extra_length as u16 + 1) << 4) | (length + extra_length * lengths[0]) as u16;
                 j += 1 << length;
@@ -417,7 +415,7 @@ impl Decompressor {
             let length = lengths[i];
             if length != 0 && length <= 12 {
                 let mut j = code;
-                while j < 4096 && length != 0 {
+                while j < 4096 {
                     self.compression.advance_table[j as usize] =
                         (i as u16 - 256) << 8 | (length as u16) << 4;
                     j += 1 << length;
@@ -521,74 +519,74 @@ impl Decompressor {
         while let State::CompressedData = self.state {
             self.fill_buffer(remaining_input);
 
-            // // Ultra-fast path: do 4 consecutive table lookups and bail if any of them need the slow path.
-            // if self.nbits >= 48 {
-            //     let bits = self.peak_bits(48);
-            //     let advance0 = self.compression.advance_table[(bits & 0xfff) as usize];
-            //     let advance0_input_bits = advance0 & 0xf;
-            //     let advance1 =
-            //         self.compression.advance_table[(bits >> advance0_input_bits) as usize & 0xfff];
-            //     let advance1_input_bits = advance1 & 0xf;
-            //     let advance2 = self.compression.advance_table
-            //         [(bits >> (advance0_input_bits + advance1_input_bits)) as usize & 0xfff];
-            //     let advance2_input_bits = advance2 & 0xf;
-            //     let advance3 = self.compression.advance_table[(bits
-            //         >> (advance0_input_bits + advance1_input_bits + advance2_input_bits))
-            //         as usize
-            //         & 0xfff];
-            //     let advance3_input_bits = advance3 & 0xf;
+            // Ultra-fast path: do 4 consecutive table lookups and bail if any of them need the slow path.
+            if self.nbits >= 48 {
+                let bits = self.peak_bits(48);
+                let advance0 = self.compression.advance_table[(bits & 0xfff) as usize];
+                let advance0_input_bits = advance0 & 0xf;
+                let advance1 =
+                    self.compression.advance_table[(bits >> advance0_input_bits) as usize & 0xfff];
+                let advance1_input_bits = advance1 & 0xf;
+                let advance2 = self.compression.advance_table
+                    [(bits >> (advance0_input_bits + advance1_input_bits)) as usize & 0xfff];
+                let advance2_input_bits = advance2 & 0xf;
+                let advance3 = self.compression.advance_table[(bits
+                    >> (advance0_input_bits + advance1_input_bits + advance2_input_bits))
+                    as usize
+                    & 0xfff];
+                let advance3_input_bits = advance3 & 0xf;
 
-            //     if advance0_input_bits > 0
-            //         && advance1_input_bits > 0
-            //         && advance2_input_bits > 0
-            //         && advance3_input_bits > 0
-            //     {
-            //         let advance0_output_bytes = (advance0 >> 4) as usize;
-            //         let advance1_output_bytes = (advance1 >> 4) as usize;
-            //         let advance2_output_bytes = (advance2 >> 4) as usize;
-            //         let advance3_output_bytes = (advance3 >> 4) as usize;
+                if advance0_input_bits > 0
+                    && advance1_input_bits > 0
+                    && advance2_input_bits > 0
+                    && advance3_input_bits > 0
+                {
+                    let advance0_output_bytes = (advance0 >> 4) as usize;
+                    let advance1_output_bytes = (advance1 >> 4) as usize;
+                    let advance2_output_bytes = (advance2 >> 4) as usize;
+                    let advance3_output_bytes = (advance3 >> 4) as usize;
 
-            //         if output_index
-            //             + advance0_output_bytes
-            //             + advance1_output_bytes
-            //             + advance2_output_bytes
-            //             + advance3_output_bytes
-            //             < output.len()
-            //         {
-            //             let data0 = self.compression.data_table[(bits & 0xfff) as usize];
-            //             let data1 = self.compression.data_table
-            //                 [(bits >> advance0_input_bits) as usize & 0xfff];
-            //             let data2 = self.compression.data_table[(bits
-            //                 >> (advance0_input_bits + advance1_input_bits))
-            //                 as usize
-            //                 & 0xfff];
-            //             let data3 = self.compression.data_table[(bits
-            //                 >> (advance0_input_bits + advance1_input_bits + advance2_input_bits))
-            //                 as usize
-            //                 & 0xfff];
+                    if output_index
+                        + advance0_output_bytes
+                        + advance1_output_bytes
+                        + advance2_output_bytes
+                        + advance3_output_bytes
+                        < output.len()
+                    {
+                        let data0 = self.compression.data_table[(bits & 0xfff) as usize];
+                        let data1 = self.compression.data_table
+                            [(bits >> advance0_input_bits) as usize & 0xfff];
+                        let data2 = self.compression.data_table[(bits
+                            >> (advance0_input_bits + advance1_input_bits))
+                            as usize
+                            & 0xfff];
+                        let data3 = self.compression.data_table[(bits
+                            >> (advance0_input_bits + advance1_input_bits + advance2_input_bits))
+                            as usize
+                            & 0xfff];
 
-            //             let advance = advance0_input_bits
-            //                 + advance1_input_bits
-            //                 + advance2_input_bits
-            //                 + advance3_input_bits;
-            //             self.consume_bits(advance as u8);
+                        let advance = advance0_input_bits
+                            + advance1_input_bits
+                            + advance2_input_bits
+                            + advance3_input_bits;
+                        self.consume_bits(advance as u8);
 
-            //             output[output_index] = data0[0];
-            //             output[output_index + 1] = data0[1];
-            //             output_index += advance0_output_bytes;
-            //             output[output_index] = data1[0];
-            //             output[output_index + 1] = data1[1];
-            //             output_index += advance1_output_bytes;
-            //             output[output_index] = data2[0];
-            //             output[output_index + 1] = data2[1];
-            //             output_index += advance2_output_bytes;
-            //             output[output_index] = data3[0];
-            //             output[output_index + 1] = data3[1];
-            //             output_index += advance3_output_bytes;
-            //             continue;
-            //         }
-            //     }
-            // }
+                        output[output_index] = data0[0];
+                        output[output_index + 1] = data0[1];
+                        output_index += advance0_output_bytes;
+                        output[output_index] = data1[0];
+                        output[output_index + 1] = data1[1];
+                        output_index += advance1_output_bytes;
+                        output[output_index] = data2[0];
+                        output[output_index + 1] = data2[1];
+                        output_index += advance2_output_bytes;
+                        output[output_index] = data3[0];
+                        output[output_index + 1] = data3[1];
+                        output_index += advance3_output_bytes;
+                        continue;
+                    }
+                }
+            }
 
             if self.nbits < 15 {
                 break;
@@ -609,14 +607,6 @@ impl Decompressor {
                     output[output_index + 1] = data[1];
                     output_index += advance_output_bytes;
                     self.consume_bits(advance_input_bits);
-
-                    // println!("code = {:b}", table_index & ((1 << advance_input_bits) - 1));
-                    // match advance_output_bytes {
-                    //     0 => unreachable!(),
-                    //     1 => println!("[{output_index}] data1 {:x}", data[0]),
-                    //     2 => println!("[{output_index}] data2 {:x} {:x}", data[0], data[1]),
-                    //     n => println!("[{output_index}] dataN {:x} {:x} n={}", data[0], data[1], n),
-                    // }
 
                     if output_index > output.len() {
                         self.queued_rle = Some((0, output_index - output.len()));
@@ -653,7 +643,6 @@ impl Decompressor {
             };
 
             if litlen_symbol < 256 {
-                // println!("[{output_index}] slow1 {litlen_symbol} {litlen_code_bits}");
                 // literal
                 if output_index >= output.len() {
                     break;
@@ -663,7 +652,6 @@ impl Decompressor {
                 self.consume_bits(litlen_code_bits);
                 continue;
             } else if litlen_symbol == 256 {
-                // println!("[{output_index}] slow1 EOF {litlen_code_bits}");
                 // end of block
                 self.consume_bits(litlen_code_bits);
                 self.state = if self.last_block {
@@ -689,10 +677,7 @@ impl Decompressor {
 
             if dist_code & self.compression.dist_symbol_masks[0]
                 == self.compression.dist_symbol_codes[0]
-                && false
             {
-                // println!("[{output_index}] rle{length} {litlen_symbol}");
-
                 let last = if output_index > 0 {
                     output[output_index - 1]
                 } else {
@@ -742,7 +727,6 @@ impl Decompressor {
                 if dist > output_index {
                     return Err(DecompressionError::DistanceTooFarBack);
                 }
-                // println!("[{output_index}] backref{length} {dist}");
 
                 let copy_length = length.min(output.len() - output_index);
                 if dist < copy_length {
@@ -804,8 +788,7 @@ impl Decompressor {
                 return Ok((0, n));
             }
         }
-        if let Some((dist, len)) = self.queued_backref {
-            // println!("queued backref{len} {dist}");
+        if let Some((dist, len)) = self.queued_backref.take() {
             let n = len.min(output.len() - output_index);
             for i in 0..n {
                 output[output_index + i] = output[output_index + i - dist];
@@ -863,13 +846,14 @@ impl Decompressor {
                         self.uncompressed_bytes_left -= 1;
                     }
                     // Buffer may contain one additional byte. Clear it to avoid confusion.
-                    self.buffer = 0;
+                    if self.nbits == 0 {
+                        self.buffer = 0;
+                    }
 
                     // Copy subsequent bytes directly from the input.
                     let copy_bytes = (self.uncompressed_bytes_left as usize)
                         .min(remaining_input.len())
                         .min(output.len() - output_index);
-                    // println!("uncompressed {:02x?}", &remaining_input[..copy_bytes.min(16)]);
                     output[output_index..][..copy_bytes]
                         .copy_from_slice(&remaining_input[..copy_bytes]);
                     remaining_input = &remaining_input[copy_bytes..];
@@ -895,11 +879,6 @@ impl Decompressor {
                         }
                         #[cfg(not(fuzzing))]
                         if (self.peak_bits(32) as u32).swap_bytes() != self.checksum.finish() {
-                            // println!(
-                            //     "checksum mismatch: {:x} != {:x}",
-                            //     (self.peak_bits(32) as u32).swap_bytes(),
-                            //     self.checksum.finish()
-                            // );
                             return Err(DecompressionError::WrongChecksum);
                         }
                         self.state = State::Done;
