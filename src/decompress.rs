@@ -54,34 +54,38 @@ struct BlockHeader {
     code_lengths: [u8; 320],
 }
 
+const LITERAL_ENTRY: u32 = 0x8000;
+const EXCEPTIONAL_ENTRY: u32 = 0x4000;
+const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
+
 /// The Decompressor state for a compressed block.
 ///
-/// The main huffman table is `advance_table` which maps a 12 bits of literal/length symbols to
-/// their meaning. Each entry is packed into a u16 using the following encoding:
+/// The main litlen_table uses a 12-bit input to lookup the meaning of the symbol. The table is
+/// split into 4 sections:
 ///
-///   000y_yyyy_yyyy_xxxx     x = input_advance_bits, y = output_advance_bytes  (x!=0)
-///   000y_yyyy_xxxx_0000     x = input_advance_bits, y = symbol-256
-///   1xxx_xxxx_xxxx_0000     x = secondary table index
-///   1111_1111_1111_0000     invalid code
+///   aaaaaaaa_bbbbbbbb_1000yyyy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
+///   0000000z_zzzzzzzz_00000yyy_0000xxxx  x = input_advance_bits, y = extra_bits, z = distance_base (length)
+///   00000000_00000000_01000000_0000xxxx  x = input_advance_bits (EOF)
+///   0000xxxx_xxxxxxxx_01100000_00000000  x = secondary_table_index
+///   00000000_00000000_01000000_00000000  invalid code
 ///
-/// If it takes more than 12 bits to determine the meaning of the symbol, then the advance table
-/// holds an index into the `secondary_table` which is added to the subsequent 3-bits from the
-/// input stream. The secondary table uses the following encoding:
+/// The distance table is a 512-entry table that maps 9 bits of distance symbols to their meaning.
 ///
-///   000y_yyyy_yyyy_xxxx     x = input_advance_bits, y = symbol
-///   1111_1111_1111_1111     invalid code
-///
+///   00000000_00000000_00000000_00000000     symbol is more than 9 bits
+///   zzzzzzzz_zzzzzzzz_0000yyyy_0000xxxx     x = input_advance_bits, y = extra_bits, z = distance_base
 #[repr(align(64))]
 struct CompressedBlock {
-    data_table: [[u8; 2]; 4096],
-    advance_table: [u16; 4096],
+    litlen_table: [u32; 4096],
+    dist_table: [u32; 512],
 
-    dist_table: [u8; 256],
     dist_symbol_lengths: [u8; 30],
     dist_symbol_masks: [u16; 30],
     dist_symbol_codes: [u16; 30],
 
     secondary_table: Vec<u16>,
+    eof_code: u16,
+    eof_mask: u16,
+    eof_bits: u8,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -106,7 +110,6 @@ pub struct Decompressor {
 
     buffer: u64,
     nbits: u8,
-    bits_read: u64,
 
     queued_rle: Option<(u8, usize)>,
     queued_backref: Option<(usize, usize)>,
@@ -122,15 +125,16 @@ impl Decompressor {
         Self {
             buffer: 0,
             nbits: 0,
-            bits_read: 0,
             compression: CompressedBlock {
-                data_table: [[0; 2]; 4096],
-                advance_table: [u16::MAX; 4096],
+                litlen_table: [0; 4096],
+                dist_table: [0; 512],
                 secondary_table: Vec::new(),
-                dist_table: [0; 256],
                 dist_symbol_lengths: [0; 30],
                 dist_symbol_masks: [0; 30],
                 dist_symbol_codes: [0xffff; 30],
+                eof_code: 0,
+                eof_mask: 0,
+                eof_bits: 0,
             },
             header: BlockHeader {
                 hlit: 0,
@@ -173,7 +177,6 @@ impl Decompressor {
         debug_assert!(self.nbits >= nbits);
         self.buffer >>= nbits;
         self.nbits -= nbits;
-        self.bits_read += nbits as u64;
     }
 
     fn read_bits(&mut self, nbits: u8, input: &mut &[u8]) -> Option<u64> {
@@ -202,7 +205,7 @@ impl Decompressor {
         self.last_block = start & 1 != 0;
         match start >> 1 {
             0b00 => {
-                let align_bits = (8 - ((self.bits_read + 3) % 8) as u8) % 8;
+                let align_bits = (self.nbits - 3) % 8;
                 let header_bits = 3 + 32 + align_bits;
                 if self.nbits < header_bits {
                     return Ok(());
@@ -363,7 +366,7 @@ impl Decompressor {
 
         // Check whether literal zero is assigned code zero. If so, our table can encode entries
         // with 3+ symbols even though each entry has only 2 data bytes.
-        let use_extra_length = lengths[0] > 0 && codes[0] == 0;
+        let use_extra_length = false && lengths[0] > 0 && codes[0] == 0;
 
         for i in 0..256 {
             let code = codes[i];
@@ -377,10 +380,10 @@ impl Decompressor {
                     0
                 };
 
-                self.compression.data_table[j as usize][0] = i as u8;
-                self.compression.data_table[j as usize][1] = 0;
-                self.compression.advance_table[j as usize] =
-                    ((extra_length as u16 + 1) << 4) | (length + extra_length * lengths[0]) as u16;
+                self.compression.litlen_table[j as usize] = ((i as u32) << 16)
+                    | LITERAL_ENTRY
+                    | (extra_length as u32 + 1) << 8
+                    | ((length + extra_length * lengths[0]) as u32);
                 j += 1 << length;
             }
 
@@ -399,25 +402,42 @@ impl Decompressor {
                                 0
                             };
 
-                            self.compression.data_table[j as usize][0] = i as u8;
-                            self.compression.data_table[j as usize][1] = ii as u8;
-                            self.compression.advance_table[j as usize] = (extra_length as u16 + 2)
-                                << 4
-                                | (length + length2 + extra_length * lengths[0]) as u16;
+                            self.compression.litlen_table[j as usize] = (ii as u32) << 24
+                                | (i as u32) << 16
+                                | LITERAL_ENTRY
+                                | (extra_length as u32 + 2) << 8
+                                | ((length + length2 + extra_length * lengths[0]) as u32);
                             j += 1 << (length + length2);
                         }
                     }
                 }
             }
         }
-        for i in 256..self.header.hlit {
+
+        if lengths[256] != 0 && lengths[256] <= 12 {
+            let mut j = codes[256];
+            while j < 4096 {
+                self.compression.litlen_table[j as usize] = EXCEPTIONAL_ENTRY | lengths[256] as u32;
+                j += 1 << lengths[256];
+            }
+        }
+        self.compression.eof_code = codes[256];
+        self.compression.eof_mask = (1 << lengths[256]) - 1;
+        self.compression.eof_bits = lengths[256];
+
+        for i in 257..self.header.hlit {
             let code = codes[i];
             let length = lengths[i];
             if length != 0 && length <= 12 {
                 let mut j = code;
                 while j < 4096 {
-                    self.compression.advance_table[j as usize] =
-                        (i as u16 - 256) << 8 | (length as u16) << 4;
+                    self.compression.litlen_table[j as usize] = if i < 286 {
+                        (LEN_SYM_TO_LEN_BASE[i as usize - 257] as u32) << 16
+                            | (LEN_SYM_TO_LEN_EXTRA[i as usize - 257] as u32) << 8
+                            | length as u32
+                    } else {
+                        EXCEPTIONAL_ENTRY
+                    };
                     j += 1 << length;
                 }
             }
@@ -425,7 +445,7 @@ impl Decompressor {
 
         for i in 0..self.header.hlit {
             if lengths[i] > 12 {
-                self.compression.advance_table[(codes[i] & 0xfff) as usize] = u16::MAX;
+                self.compression.litlen_table[(codes[i] & 0xfff) as usize] = u32::MAX;
             }
         }
 
@@ -433,8 +453,9 @@ impl Decompressor {
         for i in 0..self.header.hlit {
             if lengths[i] > 12 {
                 let j = (codes[i] & 0xfff) as usize;
-                if self.compression.advance_table[j] == u16::MAX {
-                    self.compression.advance_table[j] = (secondary_table_len << 4) | 0x8000;
+                if self.compression.litlen_table[j] == u32::MAX {
+                    self.compression.litlen_table[j] =
+                        (secondary_table_len << 16) | EXCEPTIONAL_ENTRY | SECONDARY_TABLE_ENTRY;
                     secondary_table_len += 8;
                 }
             }
@@ -446,12 +467,12 @@ impl Decompressor {
             let length = lengths[i];
             if length > 12 {
                 let j = (codes[i] & 0xfff) as usize;
-                let k = (self.compression.advance_table[j] & 0x7ff0) >> 4;
+                let k = (self.compression.litlen_table[j] >> 16) as usize;
 
                 let mut s = code >> 12;
                 while s < 8 {
-                    debug_assert_eq!(self.compression.secondary_table[k as usize + s as usize], 0);
-                    self.compression.secondary_table[k as usize + s as usize] =
+                    debug_assert_eq!(self.compression.secondary_table[k + s as usize], 0);
+                    self.compression.secondary_table[k + s as usize] =
                         ((i as u16) << 4) | (length as u16);
                     s += 1 << (length - 12);
                 }
@@ -474,10 +495,8 @@ impl Decompressor {
                 Some(codes) => codes,
                 None => {
                     if lengths.iter().filter(|&&l| l != 0).count() != 1 {
-                        println!("{:?}", lengths);
                         return Err(DecompressionError::BadDistanceHuffmanTree);
                     }
-                    self.compression.dist_table.fill(0);
                     [0; 32]
                 }
             };
@@ -488,22 +507,27 @@ impl Decompressor {
             self.compression
                 .dist_symbol_lengths
                 .copy_from_slice(&lengths[..30]);
+            self.compression.dist_table.fill(0);
             for i in 0..30 {
-                if lengths[i] == 0 {
+                let length = lengths[i];
+                let code = codes[i];
+                if length == 0 {
                     self.compression.dist_symbol_masks[i] = 0;
                     self.compression.dist_symbol_codes[i] = 0xffff;
                 } else {
                     self.compression.dist_symbol_masks[i] = (1 << lengths[i]) - 1;
-                    // let mut j = codes[i];
-                    // while j < 256 {
-                    //     self.compression.dist_table[j as usize] = i as u8;
-                    //     j += 1 << lengths[i];
-                    // }
+                    if lengths[i] <= 9 {
+                        let mut j = code;
+                        while j < 512 {
+                            self.compression.dist_table[j as usize] =
+                                (DIST_SYM_TO_DIST_BASE[i] as u32) << 16
+                                    | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8
+                                    | length as u32;
+                            j += 1 << lengths[i];
+                        }
+                    }
                 }
             }
-
-            // TODO
-            self.compression.dist_table.fill(0);
         }
 
         Ok(())
@@ -515,220 +539,236 @@ impl Decompressor {
         output: &mut [u8],
         mut output_index: usize,
     ) -> Result<usize, DecompressionError> {
-        // Main decoding loop
         while let State::CompressedData = self.state {
             self.fill_buffer(remaining_input);
-
-            // Ultra-fast path: do 4 consecutive table lookups and bail if any of them need the slow path.
-            if self.nbits >= 48 {
-                let bits = self.peak_bits(48);
-                let advance0 = self.compression.advance_table[(bits & 0xfff) as usize];
-                let advance0_input_bits = advance0 & 0xf;
-                let advance1 =
-                    self.compression.advance_table[(bits >> advance0_input_bits) as usize & 0xfff];
-                let advance1_input_bits = advance1 & 0xf;
-                let advance2 = self.compression.advance_table
-                    [(bits >> (advance0_input_bits + advance1_input_bits)) as usize & 0xfff];
-                let advance2_input_bits = advance2 & 0xf;
-                let advance3 = self.compression.advance_table[(bits
-                    >> (advance0_input_bits + advance1_input_bits + advance2_input_bits))
-                    as usize
-                    & 0xfff];
-                let advance3_input_bits = advance3 & 0xf;
-
-                if advance0_input_bits > 0
-                    && advance1_input_bits > 0
-                    && advance2_input_bits > 0
-                    && advance3_input_bits > 0
+            if self.nbits < 33 || output_index == output.len() {
+                if self.nbits >= 15
+                    && self.peak_bits(15) as u16 & self.compression.eof_mask
+                        == self.compression.eof_code
                 {
-                    let advance0_output_bytes = (advance0 >> 4) as usize;
-                    let advance1_output_bytes = (advance1 >> 4) as usize;
-                    let advance2_output_bytes = (advance2 >> 4) as usize;
-                    let advance3_output_bytes = (advance3 >> 4) as usize;
-
-                    if output_index
-                        + advance0_output_bytes
-                        + advance1_output_bytes
-                        + advance2_output_bytes
-                        + advance3_output_bytes
-                        < output.len()
-                    {
-                        let data0 = self.compression.data_table[(bits & 0xfff) as usize];
-                        let data1 = self.compression.data_table
-                            [(bits >> advance0_input_bits) as usize & 0xfff];
-                        let data2 = self.compression.data_table[(bits
-                            >> (advance0_input_bits + advance1_input_bits))
-                            as usize
-                            & 0xfff];
-                        let data3 = self.compression.data_table[(bits
-                            >> (advance0_input_bits + advance1_input_bits + advance2_input_bits))
-                            as usize
-                            & 0xfff];
-
-                        let advance = advance0_input_bits
-                            + advance1_input_bits
-                            + advance2_input_bits
-                            + advance3_input_bits;
-                        self.consume_bits(advance as u8);
-
-                        output[output_index] = data0[0];
-                        output[output_index + 1] = data0[1];
-                        output_index += advance0_output_bytes;
-                        output[output_index] = data1[0];
-                        output[output_index + 1] = data1[1];
-                        output_index += advance1_output_bytes;
-                        output[output_index] = data2[0];
-                        output[output_index + 1] = data2[1];
-                        output_index += advance2_output_bytes;
-                        output[output_index] = data3[0];
-                        output[output_index + 1] = data3[1];
-                        output_index += advance3_output_bytes;
-                        continue;
-                    }
+                    // println!("[{output_index}] EOF");
+                    self.consume_bits(self.compression.eof_bits);
+                    self.state = match self.last_block {
+                        true => State::Checksum,
+                        false => State::BlockHeader,
+                    };
                 }
-            }
-
-            if self.nbits < 15 {
                 break;
             }
 
-            let table_index = self.peak_bits(12);
-            let data = self.compression.data_table[table_index as usize];
-            let advance = self.compression.advance_table[table_index as usize];
+            let mut bits = self.buffer as usize;
+            let litlen_entry = self.compression.litlen_table[bits & 0xfff];
+            let litlen_code_bits = litlen_entry as u8;
 
-            let advance_input_bits = (advance & 0x0f) as u8;
-            let advance_output_bytes = (advance >> 4) as usize;
+            if litlen_entry & LITERAL_ENTRY != 0 {
+                // Ultra-fast path: do 3 more consecutive table lookups and bail if any of them need the slow path.
+                if self.nbits >= 48 {
+                    let litlen_entry2 =
+                        self.compression.litlen_table[bits >> litlen_code_bits & 0xfff];
+                    let litlen_code_bits2 = litlen_entry2 as u8;
+                    let litlen_entry3 = self.compression.litlen_table
+                        [bits >> (litlen_code_bits + litlen_code_bits2) & 0xfff];
+                    let litlen_code_bits3 = litlen_entry3 as u8;
+                    let litlen_entry4 = self.compression.litlen_table[bits
+                        >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3)
+                        & 0xfff];
+                    let litlen_code_bits4 = litlen_entry4 as u8;
+                    if litlen_entry2 & litlen_entry3 & litlen_entry4 & LITERAL_ENTRY != 0 {
+                        let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
+                        let advance_output_bytes2 = ((litlen_entry2 & 0xf00) >> 8) as usize;
+                        let advance_output_bytes3 = ((litlen_entry3 & 0xf00) >> 8) as usize;
+                        let advance_output_bytes4 = ((litlen_entry4 & 0xf00) >> 8) as usize;
+                        if output_index
+                            + advance_output_bytes
+                            + advance_output_bytes2
+                            + advance_output_bytes3
+                            + advance_output_bytes4
+                            < output.len()
+                        {
+                            self.consume_bits(
+                                litlen_code_bits
+                                    + litlen_code_bits2
+                                    + litlen_code_bits3
+                                    + litlen_code_bits4,
+                            );
 
-            // Fast path: if the next symbol is <= 12 bits and a literal, the table specifies the
-            // output bytes and we can directly write them to the output buffer.
-            if advance_input_bits > 0 {
-                if output_index + 1 < output.len() {
-                    output[output_index] = data[0];
-                    output[output_index + 1] = data[1];
-                    output_index += advance_output_bytes;
-                    self.consume_bits(advance_input_bits);
-
-                    if output_index > output.len() {
-                        self.queued_rle = Some((0, output_index - output.len()));
-                        output_index = output.len();
-                        break;
-                    } else {
-                        continue;
+                            output[output_index] = (litlen_entry >> 16) as u8;
+                            output[output_index + 1] = (litlen_entry >> 24) as u8;
+                            output_index += advance_output_bytes;
+                            output[output_index] = (litlen_entry2 >> 16) as u8;
+                            output[output_index + 1] = (litlen_entry2 >> 24) as u8;
+                            output_index += advance_output_bytes2;
+                            output[output_index] = (litlen_entry3 >> 16) as u8;
+                            output[output_index + 1] = (litlen_entry3 >> 24) as u8;
+                            output_index += advance_output_bytes3;
+                            output[output_index] = (litlen_entry4 >> 16) as u8;
+                            output[output_index + 1] = (litlen_entry4 >> 24) as u8;
+                            output_index += advance_output_bytes4;
+                            continue;
+                        }
                     }
+                }
+
+                // Fast path: the next symbol is <= 12 bits and a literal, the table specifies the
+                // output bytes and we can directly write them to the output buffer.
+                let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
+
+                // match advance_output_bytes {
+                //     1 => println!("[{output_index}] LIT1 {}", litlen_entry >> 16),
+                //     2 => println!(
+                //         "[{output_index}] LIT2 {} {} {}",
+                //         (litlen_entry >> 16) as u8,
+                //         litlen_entry >> 24,
+                //         bits & 0xfff
+                //     ),
+                //     n => println!(
+                //         "[{output_index}] LIT{n} {} {}",
+                //         (litlen_entry >> 16) as u8,
+                //         litlen_entry >> 24,
+                //     ),
+                // }
+
+                if output_index + 1 < output.len() {
+                    output[output_index] = (litlen_entry >> 16) as u8;
+                    output[output_index + 1] = (litlen_entry >> 24) as u8;
+                    output_index += advance_output_bytes;
+                    self.consume_bits(litlen_code_bits);
+
+                    // if output_index > output.len() {
+                    //     self.queued_rle = Some((0, output_index - output.len()));
+                    //     output_index = output.len();
+                    //     break;
+                    // } else {
+                    continue;
+                    // }
                 } else if output_index + advance_output_bytes == output.len() {
                     debug_assert_eq!(advance_output_bytes, 1);
-                    output[output_index] = data[0];
+                    output[output_index] = (litlen_entry >> 16) as u8;
                     output_index += 1;
-                    self.consume_bits(advance_input_bits);
+                    self.consume_bits(litlen_code_bits);
                     break;
                 } else {
                     break;
                 }
             }
 
-            // Slow path: the next symbol is a length symbol and/or is more than 12 bits.
-            let (litlen_code_bits, litlen_symbol) = if advance & 0x8000 == 0 {
+            let (length_base, length_extra_bits, litlen_code_bits) =
+                if litlen_entry & EXCEPTIONAL_ENTRY == 0 {
+                    (
+                        litlen_entry >> 16,
+                        (litlen_entry >> 8) as u8,
+                        litlen_code_bits,
+                    )
+                } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
+                    let secondary_index = litlen_entry >> 16;
+                    let secondary_entry = self.compression.secondary_table
+                        [secondary_index as usize + ((bits >> 12) & 0x7)];
+                    let litlen_symbol = secondary_entry >> 4;
+                    let litlen_code_bits = (secondary_entry & 0xf) as u8;
+
+                    if litlen_symbol < 256 {
+                        if output_index == output.len() {
+                            break;
+                        }
+                        // println!("[{output_index}] LIT1b {} (val={:04x})", litlen_symbol, self.peak_bits(15));
+
+                        self.consume_bits(litlen_code_bits);
+                        output[output_index] = litlen_symbol as u8;
+                        output_index += 1;
+                        continue;
+                    } else if litlen_symbol == 256 {
+                        // println!("[{output_index}] EOF");
+                        self.consume_bits(litlen_code_bits);
+                        self.state = match self.last_block {
+                            true => State::Checksum,
+                            false => State::BlockHeader,
+                        };
+                        break;
+                    }
+
+                    (
+                        LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
+                        LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257] as u8,
+                        litlen_code_bits,
+                    )
+                } else if litlen_code_bits == 0 {
+                    return Err(DecompressionError::InvalidLiteralLengthCode);
+                } else {
+                    // println!("[{output_index}] EOF");
+                    self.consume_bits(litlen_code_bits);
+                    self.state = match self.last_block {
+                        true => State::Checksum,
+                        false => State::BlockHeader,
+                    };
+                    break;
+                };
+            bits >>= litlen_code_bits;
+
+            let length_extra_mask = (1 << length_extra_bits) - 1;
+            let length = length_base as usize + (bits & length_extra_mask);
+            bits >>= length_extra_bits;
+
+            let dist_entry = self.compression.dist_table[bits & 0x1ff];
+            let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry != 0 {
                 (
-                    (advance_output_bytes & 0x0f) as u8,
-                    256 + (advance_output_bytes >> 4) as usize,
+                    (dist_entry >> 16) as u16,
+                    (dist_entry >> 8) as u8,
+                    dist_entry as u8,
                 )
-            } else if advance != 0xfff0 {
-                let next3 = self.peak_bits(15) >> 12;
-                let secondary_index = (advance & 0x7ff0) >> 4;
-                let secondary =
-                    self.compression.secondary_table[secondary_index as usize + next3 as usize];
-                ((secondary & 0xf) as u8, (secondary >> 4) as usize)
             } else {
-                return Err(DecompressionError::InvalidLiteralLengthCode);
-            };
-
-            if litlen_symbol < 256 {
-                // literal
-                if output_index >= output.len() {
-                    break;
-                }
-                output[output_index] = litlen_symbol as u8;
-                output_index += 1;
-                self.consume_bits(litlen_code_bits);
-                continue;
-            } else if litlen_symbol == 256 {
-                // end of block
-                self.consume_bits(litlen_code_bits);
-                self.state = if self.last_block {
-                    State::Checksum
-                } else {
-                    State::BlockHeader
-                };
-                break;
-            } else if litlen_symbol > 285 {
-                return Err(DecompressionError::InvalidLiteralLengthCode);
-            }
-
-            let length_extra_bits = LEN_SYM_TO_LEN_EXTRA[litlen_symbol - 257];
-            if self.nbits < length_extra_bits + litlen_code_bits + 28 {
-                break;
-            }
-
-            let bits =
-                self.peak_bits(length_extra_bits + litlen_code_bits + 28) >> litlen_code_bits;
-            let length_code = bits & ((1 << length_extra_bits) - 1);
-            let dist_code = ((bits >> length_extra_bits) & 0x7fff) as u16;
-            let length = LEN_SYM_TO_LEN_BASE[litlen_symbol - 257] + length_code as usize;
-
-            if dist_code & self.compression.dist_symbol_masks[0]
-                == self.compression.dist_symbol_codes[0]
-            {
-                let last = if output_index > 0 {
-                    output[output_index - 1]
-                } else {
-                    return Err(DecompressionError::InputStartsWithRun);
-                };
-
-                self.consume_bits(
-                    length_extra_bits + litlen_code_bits + self.compression.dist_symbol_lengths[0],
-                );
-
-                // fdeflate only writes runs of zeros, but handling non-zero runs isn't hard and
-                // it is too late to bail now.
-                if last != 0 {
-                    let end = (output_index + length).min(output.len());
-                    output[output_index..end].fill(last);
-                }
-
-                // The run can easily extend past the end of the output buffer. If so, queue the
-                // output for the next call and break.
-                if output_index + length > output.len() {
-                    self.queued_rle = Some((last, output_index + length - output.len()));
-                    output_index = output.len();
-                    break;
-                } else {
-                    output_index += length;
-                }
-            } else {
-                let mut dist_symbol = 999;
-                for j in self.compression.dist_table[dist_code as usize & 0xFF] as usize..30 {
-                    if dist_code & self.compression.dist_symbol_masks[j]
-                        == self.compression.dist_symbol_codes[j]
+                let mut dist_extra_bits = 0;
+                let mut dist_base = 0;
+                let mut dist_advance_bits = 0;
+                for i in 0..self.compression.dist_symbol_lengths.len() {
+                    if bits as u16 & self.compression.dist_symbol_masks[i]
+                        == self.compression.dist_symbol_codes[i]
                     {
-                        dist_symbol = j;
+                        dist_extra_bits = DIST_SYM_TO_DIST_EXTRA[i];
+                        dist_base = DIST_SYM_TO_DIST_BASE[i];
+                        dist_advance_bits = self.compression.dist_symbol_lengths[i];
                         break;
                     }
                 }
-                if dist_symbol == 999 {
+                if dist_advance_bits == 0 {
                     return Err(DecompressionError::InvalidDistanceCode);
                 }
+                (dist_base, dist_extra_bits, dist_advance_bits)
+            };
+            bits >>= dist_code_bits;
 
-                let dist_code_bits = self.compression.dist_symbol_lengths[dist_symbol];
-                let dist_extra_bits = DIST_SYM_TO_DIST_EXTRA[dist_symbol];
-                let dist_extra_mask = (1 << dist_extra_bits) - 1;
-                let dist = DIST_SYM_TO_DIST_BASE[dist_symbol] as usize
-                    + ((bits >> (length_extra_bits + dist_code_bits)) & dist_extra_mask) as usize;
+            let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1));
+            let total_bits =
+                litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits;
 
-                if dist > output_index {
-                    return Err(DecompressionError::DistanceTooFarBack);
+            if self.nbits < total_bits {
+                break;
+            } else if dist > output_index {
+                return Err(DecompressionError::DistanceTooFarBack);
+            }
+
+            // println!("[{output_index}] BACKREF len={} dist={} {:x}", length, dist, dist_entry);
+            self.consume_bits(total_bits);
+
+            let copy_length = length.min(output.len() - output_index);
+            if dist == 1 {
+                let last = output[output_index - 1];
+                output[output_index..][..copy_length].fill(last);
+
+                if copy_length < length {
+                    self.queued_rle = Some((last, length - copy_length));
+                    output_index = output.len();
+                    break;
                 }
+            } else if output_index + length + 15 <= output.len() {
+                let start = output_index - dist;
+                output.copy_within(start..start + 16, output_index);
 
-                let copy_length = length.min(output.len() - output_index);
+                if length > 16 || dist < 16 {
+                    for i in (0..length).step_by(dist.min(16)).skip(1) {
+                        output.copy_within(start + i..start + i + 16, output_index + i);
+                    }
+                }
+            } else {
                 if dist < copy_length {
                     for i in 0..copy_length {
                         output[output_index + i] = output[output_index + i - dist];
@@ -739,18 +779,16 @@ impl Decompressor {
                         output_index,
                     )
                 }
-                output_index += copy_length;
-
-                self.consume_bits(
-                    litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits,
-                );
 
                 if copy_length < length {
                     self.queued_backref = Some((dist, length - copy_length));
+                    output_index = output.len();
                     break;
                 }
             }
+            output_index += copy_length;
         }
+
         Ok(output_index)
     }
 
@@ -772,7 +810,6 @@ impl Decompressor {
         }
 
         assert!(output.len() >= output_position + 2);
-        debug_assert!(output[output_position..].iter().all(|&b| b == 0));
 
         let mut remaining_input = &input[..];
         let mut output_index = output_position;
@@ -871,7 +908,7 @@ impl Decompressor {
                 State::Checksum => {
                     self.fill_buffer(&mut remaining_input);
 
-                    let align_bits = (8 - (self.bits_read % 8) as u8) % 8;
+                    let align_bits = self.nbits % 8;
                     if self.nbits >= 32 + align_bits {
                         self.checksum.write(&output[output_position..output_index]);
                         if align_bits != 0 {
@@ -962,15 +999,23 @@ mod tests {
         //     .unwrap();
         let decompressed = decompress_to_vec(&data).unwrap();
         let decompressed2 = miniz_oxide::inflate::decompress_to_vec_zlib(&data).unwrap();
-        for (i, (a, b)) in decompressed
-            .chunks(1)
-            .zip(decompressed2.chunks(1))
-            .enumerate()
-        {
-            assert_eq!(a, b, "index {i}");
+        for i in 0..decompressed.len().min(decompressed2.len()) {
+            if decompressed[i] != decompressed2[i] {
+                panic!(
+                    "mismatch at index {} {:?} {:?}",
+                    i,
+                    &decompressed[i.saturating_sub(1)..(i + 16).min(decompressed.len())],
+                    &decompressed2[i.saturating_sub(1)..(i + 16).min(decompressed2.len())]
+                );
+            }
         }
         if decompressed != decompressed2 {
-            panic!("length mismatch {} {} {:x?}", decompressed.len(), decompressed2.len(), &decompressed2[decompressed.len()..][..16]);
+            panic!(
+                "length mismatch {} {} {:x?}",
+                decompressed.len(),
+                decompressed2.len(),
+                &decompressed2[decompressed.len()..][..16]
+            );
         }
         //assert_eq!(decompressed, decompressed2);
     }
@@ -1019,88 +1064,5 @@ mod tests {
             println!("Random data: {:?}", data);
             roundtrip_miniz_oxide(&data);
         }
-    }
-
-    #[test]
-    fn simple() {
-        compare_decompression(&[
-            120, 1, 154, 41, 120, 1, 0, 255, 0, 0, 255, 1, 0, 0, 41, 41, 169, 93, 41, 255, 0, 0, 0,
-            13, 120, 1, 237, 224, 1, 144, 36, 73, 146, 36, 73, 18, 139, 0, 0, 0, 16, 0, 0, 0, 0, 0,
-            0, 0, 0, 204, 204, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 249, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 170, 153, 187, 71, 68, 68, 102, 102, 102, 86, 117, 7, 7, 7, 7, 7, 7,
-            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-            7, 78, 85, 85, 119, 119, 119, 119, 119, 247, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 255, 255, 255, 255, 255, 255, 0, 108, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 203, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 120, 1, 5, 224, 1, 144, 36, 73, 146, 36, 73, 18, 139, 170, 153, 187, 71, 68, 68,
-            154, 41, 120, 1, 0, 255, 0, 0, 255, 1, 0, 0, 40, 41, 41, 41, 169, 255, 0, 0, 0, 13,
-            120, 1, 237, 224, 1, 144, 32, 146, 36, 73, 18, 139, 0, 0, 0, 16, 0, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            68, 102, 102, 102, 86, 117, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 78, 85, 85, 119, 119, 119, 119, 119,
-            247, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 255, 255, 255, 255,
-            255, 255, 0, 108, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 120, 1, 5, 224, 1, 144, 36, 73, 146,
-            36, 73, 18, 139, 170, 153, 187, 71, 68, 68, 154, 41, 120, 1, 0, 255, 0, 0, 255, 1, 0,
-            0, 93, 41, 41, 41, 169, 255, 0, 0, 0, 13, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 153, 187,
-            71, 68, 68, 102, 102, 102, 86, 117, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 78, 85, 85, 119, 119, 119,
-            119, 119, 247, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 255, 255,
-            255, 255, 255, 255, 0, 108, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 203, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 120, 1, 5, 224, 1, 144, 36,
-            73, 146, 36, 73, 18, 139, 170, 153, 187, 71, 68, 68, 154, 41, 120, 1, 0, 255, 0, 0,
-            255, 1, 0, 0, 40, 41, 41, 41, 169, 255, 0, 0, 0, 13, 120, 1, 237, 224, 1, 144, 32, 146,
-            36, 73, 18, 139, 0, 0, 0, 16, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 63, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 68, 102, 102, 102, 86, 117, 7, 7, 7,
-            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-            7, 7, 7, 7, 78, 85, 85, 119, 119, 119, 119, 119, 247, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 255, 255, 255, 255, 255, 255, 0, 108, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204, 204,
-            204, 204, 204, 120, 1, 5, 224, 1, 144, 36, 73, 146, 36, 73, 18, 139, 170, 153, 187, 71,
-            68, 68, 154, 41, 120, 1, 0, 255, 0, 0, 255, 1, 0, 0, 93, 41, 41, 41, 169, 255, 0, 0, 0,
-            13, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239,
-            239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 239, 255, 255, 255,
-            255, 255, 255, 0, 108, 144, 32, 146, 36, 73, 147, 147, 147, 147, 147, 147, 147, 147,
-            147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147,
-            147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147,
-            147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147,
-            147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147,
-            147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147,
-            147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147,
-            147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147, 147,
-            18, 139, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 1, 5, 224, 1, 144, 36, 73, 146, 36, 73, 18, 139, 170, 153, 187, 71,
-            68, 68, 154, 41, 120, 1, 0, 255, 0, 0, 255, 1, 0, 0, 93, 41, 41, 41, 169, 255, 0, 0, 0,
-            13, 120, 1, 237, 224, 1, 144, 32, 146, 36, 73, 18, 139, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 5, 224, 1, 144, 36, 73, 146, 36, 73, 18, 139, 187,
-            71, 68, 68, 154, 41, 120, 1, 0, 255, 0, 0, 255, 1, 0, 0, 93, 41, 41, 41, 169, 255, 0,
-            0, 0, 13, 120, 1, 237, 224, 1, 144, 0, 68, 102, 230, 102, 86, 85, 85, 85, 85, 119, 119,
-            119, 119, 119, 247, 204, 204, 204, 204, 204, 0, 0, 204, 204,
-        ]);
     }
 }
