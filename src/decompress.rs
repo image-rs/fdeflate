@@ -246,7 +246,7 @@ impl Decompressor {
             0b01 => {
                 self.consume_bits(3);
                 // TODO: Do this statically rather than every time.
-                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
+                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression, 6)?;
                 self.state = State::CompressedData;
                 return Ok(());
             }
@@ -381,6 +381,7 @@ impl Decompressor {
                 self.header.hlit,
                 &self.header.code_lengths,
                 &mut self.compression,
+                6,
             )?;
         }
         self.state = State::CompressedData;
@@ -391,6 +392,7 @@ impl Decompressor {
         hlit: usize,
         code_lengths: &[u8],
         compression: &mut CompressedBlock,
+        max_search_bits: u8,
     ) -> Result<(), DecompressionError> {
         // Build the literal/length code table.
         let lengths = &code_lengths[..288];
@@ -411,7 +413,7 @@ impl Decompressor {
                 j += 1 << length;
             }
 
-            if length > 0 && length <= 6 {
+            if length > 0 && length <= max_search_bits {
                 for ii in 0..256 {
                     let code2 = codes[ii];
                     let length2 = lengths[ii];
@@ -1077,7 +1079,7 @@ mod tests {
         lengths.resize(288, 0);
         lengths.push(1);
         lengths.resize(320, 0);
-        Decompressor::build_tables(286, &lengths, &mut compression).unwrap();
+        Decompressor::build_tables(286, &lengths, &mut compression, 11).unwrap();
 
         assert_eq!(
             compression, FDEFLATE_COMPRESSED_BLOCK,
