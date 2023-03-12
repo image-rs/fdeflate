@@ -397,10 +397,6 @@ impl Decompressor {
         let codes: [u16; 288] = crate::compute_codes(&lengths.try_into().unwrap())
             .ok_or(DecompressionError::BadLiteralLengthHuffmanTree)?;
 
-        // Check whether literal zero is assigned code zero. If so, our table can encode entries
-        // with 3+ symbols even though each entry has only 2 data bytes.
-        let use_extra_length = false && lengths[0] > 0 && codes[0] == 0;
-
         let table_bits = lengths.iter().cloned().max().unwrap().min(12).max(6);
         let table_size = 1 << table_bits;
 
@@ -410,16 +406,8 @@ impl Decompressor {
             let mut j = code;
 
             while j < table_size && length != 0 && length <= 12 {
-                let extra_length = if use_extra_length {
-                    ((j | 0xf000) >> length).trailing_zeros() as u8 / lengths[0]
-                } else {
-                    0
-                };
-
-                compression.litlen_table[j as usize] = ((i as u32) << 16)
-                    | LITERAL_ENTRY
-                    | (extra_length as u32 + 1) << 8
-                    | ((length + extra_length * lengths[0]) as u32);
+                compression.litlen_table[j as usize] =
+                    ((i as u32) << 16) | LITERAL_ENTRY | (1 << 8) | length as u32;
                 j += 1 << length;
             }
 
@@ -431,18 +419,11 @@ impl Decompressor {
                         let mut j = code | (code2 << length);
 
                         while j < table_size {
-                            let extra_length = if use_extra_length {
-                                ((j | 0xf000) >> (length + length2)).trailing_zeros() as u8
-                                    / lengths[0]
-                            } else {
-                                0
-                            };
-
                             compression.litlen_table[j as usize] = (ii as u32) << 24
                                 | (i as u32) << 16
                                 | LITERAL_ENTRY
-                                | (extra_length as u32 + 2) << 8
-                                | ((length + length2 + extra_length * lengths[0]) as u32);
+                                | (2 << 8)
+                                | ((length + length2) as u32);
                             j += 1 << (length + length2);
                         }
                     }
@@ -459,7 +440,7 @@ impl Decompressor {
         }
 
         let table_size = table_size as usize;
-        for i in (table_size ..4096).step_by(table_size ) {
+        for i in (table_size..4096).step_by(table_size) {
             compression.litlen_table.copy_within(0..table_size, i);
         }
 
