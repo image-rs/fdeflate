@@ -3,8 +3,8 @@ use std::convert::TryInto;
 use simd_adler32::Adler32;
 
 use crate::tables::{
-    CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_CODE_LENGTHS,
-    LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
+    self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FDEFLATE_DIST_DECODE_TABLE,
+    FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
 };
 
 #[derive(Debug)]
@@ -74,6 +74,7 @@ const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
 ///   00000000_00000000_00000000_00000000     symbol is more than 9 bits
 ///   zzzzzzzz_zzzzzzzz_0000yyyy_0000xxxx     x = input_advance_bits, y = extra_bits, z = distance_base
 #[repr(align(64))]
+#[derive(Eq, PartialEq, Debug)]
 struct CompressedBlock {
     litlen_table: [u32; 4096],
     dist_table: [u32; 512],
@@ -87,6 +88,26 @@ struct CompressedBlock {
     eof_mask: u16,
     eof_bits: u8,
 }
+
+const FDEFLATE_COMPRESSED_BLOCK: CompressedBlock = CompressedBlock {
+    litlen_table: FDEFLATE_LITLEN_DECODE_TABLE,
+    dist_table: FDEFLATE_DIST_DECODE_TABLE,
+    dist_symbol_lengths: [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    dist_symbol_masks: [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    dist_symbol_codes: [
+        0, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+    ],
+    secondary_table: Vec::new(),
+    eof_code: 0x8ff,
+    eof_mask: 0xfff,
+    eof_bits: 0xc,
+};
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum State {
@@ -225,10 +246,7 @@ impl Decompressor {
             0b01 => {
                 self.consume_bits(3);
                 // TODO: Do this statically rather than every time.
-                self.header.hlit = 288;
-                self.header.hdist = 32;
-                self.header.code_lengths = FIXED_CODE_LENGTHS;
-                self.build_tables()?;
+                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
                 self.state = State::CompressedData;
                 return Ok(());
             }
@@ -353,14 +371,29 @@ impl Decompressor {
             self.header.code_lengths[i] = 0;
         }
 
-        self.build_tables()?;
+        if self.header.hdist == 1
+            && self.header.code_lengths[..286] == tables::HUFFMAN_LENGTHS
+            && self.header.code_lengths[288] == 1
+        {
+            self.compression = FDEFLATE_COMPRESSED_BLOCK;
+        } else {
+            Self::build_tables(
+                self.header.hlit,
+                &self.header.code_lengths,
+                &mut self.compression,
+            )?;
+        }
         self.state = State::CompressedData;
         Ok(())
     }
 
-    fn build_tables(&mut self) -> Result<(), DecompressionError> {
+    fn build_tables(
+        hlit: usize,
+        code_lengths: &[u8],
+        compression: &mut CompressedBlock,
+    ) -> Result<(), DecompressionError> {
         // Build the literal/length code table.
-        let lengths = &self.header.code_lengths[..288];
+        let lengths = &code_lengths[..288];
         let codes: [u16; 288] = crate::compute_codes(&lengths.try_into().unwrap())
             .ok_or(DecompressionError::BadLiteralLengthHuffmanTree)?;
 
@@ -380,7 +413,7 @@ impl Decompressor {
                     0
                 };
 
-                self.compression.litlen_table[j as usize] = ((i as u32) << 16)
+                compression.litlen_table[j as usize] = ((i as u32) << 16)
                     | LITERAL_ENTRY
                     | (extra_length as u32 + 1) << 8
                     | ((length + extra_length * lengths[0]) as u32);
@@ -402,7 +435,7 @@ impl Decompressor {
                                 0
                             };
 
-                            self.compression.litlen_table[j as usize] = (ii as u32) << 24
+                            compression.litlen_table[j as usize] = (ii as u32) << 24
                                 | (i as u32) << 16
                                 | LITERAL_ENTRY
                                 | (extra_length as u32 + 2) << 8
@@ -417,21 +450,21 @@ impl Decompressor {
         if lengths[256] != 0 && lengths[256] <= 12 {
             let mut j = codes[256];
             while j < 4096 {
-                self.compression.litlen_table[j as usize] = EXCEPTIONAL_ENTRY | lengths[256] as u32;
+                compression.litlen_table[j as usize] = EXCEPTIONAL_ENTRY | lengths[256] as u32;
                 j += 1 << lengths[256];
             }
         }
-        self.compression.eof_code = codes[256];
-        self.compression.eof_mask = (1 << lengths[256]) - 1;
-        self.compression.eof_bits = lengths[256];
+        compression.eof_code = codes[256];
+        compression.eof_mask = (1 << lengths[256]) - 1;
+        compression.eof_bits = lengths[256];
 
-        for i in 257..self.header.hlit {
+        for i in 257..hlit {
             let code = codes[i];
             let length = lengths[i];
             if length != 0 && length <= 12 {
                 let mut j = code;
                 while j < 4096 {
-                    self.compression.litlen_table[j as usize] = if i < 286 {
+                    compression.litlen_table[j as usize] = if i < 286 {
                         (LEN_SYM_TO_LEN_BASE[i as usize - 257] as u32) << 16
                             | (LEN_SYM_TO_LEN_EXTRA[i as usize - 257] as u32) << 8
                             | length as u32
@@ -443,53 +476,52 @@ impl Decompressor {
             }
         }
 
-        for i in 0..self.header.hlit {
+        for i in 0..hlit {
             if lengths[i] > 12 {
-                self.compression.litlen_table[(codes[i] & 0xfff) as usize] = u32::MAX;
+                compression.litlen_table[(codes[i] & 0xfff) as usize] = u32::MAX;
             }
         }
 
         let mut secondary_table_len = 0;
-        for i in 0..self.header.hlit {
+        for i in 0..hlit {
             if lengths[i] > 12 {
                 let j = (codes[i] & 0xfff) as usize;
-                if self.compression.litlen_table[j] == u32::MAX {
-                    self.compression.litlen_table[j] =
+                if compression.litlen_table[j] == u32::MAX {
+                    compression.litlen_table[j] =
                         (secondary_table_len << 16) | EXCEPTIONAL_ENTRY | SECONDARY_TABLE_ENTRY;
                     secondary_table_len += 8;
                 }
             }
         }
         assert!(secondary_table_len <= 0x7ff);
-        self.compression.secondary_table = vec![0; secondary_table_len as usize];
-        for i in 0..self.header.hlit {
+        compression.secondary_table = vec![0; secondary_table_len as usize];
+        for i in 0..hlit {
             let code = codes[i];
             let length = lengths[i];
             if length > 12 {
                 let j = (codes[i] & 0xfff) as usize;
-                let k = (self.compression.litlen_table[j] >> 16) as usize;
+                let k = (compression.litlen_table[j] >> 16) as usize;
 
                 let mut s = code >> 12;
                 while s < 8 {
-                    debug_assert_eq!(self.compression.secondary_table[k + s as usize], 0);
-                    self.compression.secondary_table[k + s as usize] =
+                    debug_assert_eq!(compression.secondary_table[k + s as usize], 0);
+                    compression.secondary_table[k + s as usize] =
                         ((i as u16) << 4) | (length as u16);
                     s += 1 << (length - 12);
                 }
             }
         }
-        debug_assert!(self
-            .compression
+        debug_assert!(compression
             .secondary_table
             .iter()
             .all(|&x| x != 0 && (x & 0xf) > 12));
 
         // Build the distance code table.
-        let lengths = &self.header.code_lengths[288..320];
+        let lengths = &code_lengths[288..320];
         if lengths == [0; 32] {
-            self.compression.dist_symbol_masks = [0; 30];
-            self.compression.dist_symbol_codes = [0xffff; 30];
-            self.compression.dist_table.fill(0);
+            compression.dist_symbol_masks = [0; 30];
+            compression.dist_symbol_codes = [0xffff; 30];
+            compression.dist_table.fill(0);
         } else {
             let codes: [u16; 32] = match crate::compute_codes(&lengths.try_into().unwrap()) {
                 Some(codes) => codes,
@@ -501,28 +533,26 @@ impl Decompressor {
                 }
             };
 
-            self.compression
-                .dist_symbol_codes
-                .copy_from_slice(&codes[..30]);
-            self.compression
+            compression.dist_symbol_codes.copy_from_slice(&codes[..30]);
+            compression
                 .dist_symbol_lengths
                 .copy_from_slice(&lengths[..30]);
-            self.compression.dist_table.fill(0);
+            compression.dist_table.fill(0);
             for i in 0..30 {
                 let length = lengths[i];
                 let code = codes[i];
                 if length == 0 {
-                    self.compression.dist_symbol_masks[i] = 0;
-                    self.compression.dist_symbol_codes[i] = 0xffff;
+                    compression.dist_symbol_masks[i] = 0;
+                    compression.dist_symbol_codes[i] = 0xffff;
                 } else {
-                    self.compression.dist_symbol_masks[i] = (1 << lengths[i]) - 1;
+                    compression.dist_symbol_masks[i] = (1 << lengths[i]) - 1;
                     if lengths[i] <= 9 {
                         let mut j = code;
                         while j < 512 {
-                            self.compression.dist_table[j as usize] =
-                                (DIST_SYM_TO_DIST_BASE[i] as u32) << 16
-                                    | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8
-                                    | length as u32;
+                            compression.dist_table[j as usize] = (DIST_SYM_TO_DIST_BASE[i] as u32)
+                                << 16
+                                | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8
+                                | length as u32;
                             j += 1 << lengths[i];
                         }
                     }
@@ -970,7 +1000,7 @@ pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tables::{LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL};
+    use crate::tables::{self, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL};
 
     use super::*;
     use rand::Rng;
@@ -1038,6 +1068,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fdeflate_table() {
+        let mut compression = CompressedBlock {
+            litlen_table: [0; 4096],
+            dist_table: [0; 512],
+            dist_symbol_lengths: [0; 30],
+            dist_symbol_masks: [0; 30],
+            dist_symbol_codes: [0; 30],
+            secondary_table: Vec::new(),
+            eof_code: 0,
+            eof_mask: 0,
+            eof_bits: 0,
+        };
+        let mut lengths = tables::HUFFMAN_LENGTHS.to_vec();
+        lengths.resize(288, 0);
+        lengths.push(1);
+        lengths.resize(320, 0);
+        Decompressor::build_tables(286, &lengths, &mut compression).unwrap();
+
+        assert_eq!(
+            compression, FDEFLATE_COMPRESSED_BLOCK,
+            "{:#x?}",
+            compression
+        );
     }
 
     #[test]
