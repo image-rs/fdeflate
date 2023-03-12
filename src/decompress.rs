@@ -401,12 +401,15 @@ impl Decompressor {
         // with 3+ symbols even though each entry has only 2 data bytes.
         let use_extra_length = false && lengths[0] > 0 && codes[0] == 0;
 
+        let table_bits = lengths.iter().cloned().max().unwrap().min(12).max(6);
+        let table_size = 1 << table_bits;
+
         for i in 0..256 {
             let code = codes[i];
             let length = lengths[i];
             let mut j = code;
 
-            while j < 4096 && length != 0 && length <= 12 {
+            while j < table_size && length != 0 && length <= 12 {
                 let extra_length = if use_extra_length {
                     ((j | 0xf000) >> length).trailing_zeros() as u8 / lengths[0]
                 } else {
@@ -420,14 +423,14 @@ impl Decompressor {
                 j += 1 << length;
             }
 
-            if length > 0 && length <= 9 {
+            if length > 0 && length <= 6 {
                 for ii in 0..256 {
                     let code2 = codes[ii];
                     let length2 = lengths[ii];
-                    if length2 != 0 && length + length2 <= 12 {
+                    if length2 != 0 && length + length2 <= table_bits {
                         let mut j = code | (code2 << length);
 
-                        while j < 4096 {
+                        while j < table_size {
                             let extra_length = if use_extra_length {
                                 ((j | 0xf000) >> (length + length2)).trailing_zeros() as u8
                                     / lengths[0]
@@ -449,11 +452,17 @@ impl Decompressor {
 
         if lengths[256] != 0 && lengths[256] <= 12 {
             let mut j = codes[256];
-            while j < 4096 {
+            while j < table_size {
                 compression.litlen_table[j as usize] = EXCEPTIONAL_ENTRY | lengths[256] as u32;
                 j += 1 << lengths[256];
             }
         }
+
+        let table_size = table_size as usize;
+        for i in (table_size ..4096).step_by(table_size ) {
+            compression.litlen_table.copy_within(0..table_size, i);
+        }
+
         compression.eof_code = codes[256];
         compression.eof_mask = (1 << lengths[256]) - 1;
         compression.eof_bits = lengths[256];
