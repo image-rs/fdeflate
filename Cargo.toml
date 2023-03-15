@@ -20,7 +20,5 @@ categories = ["compression"]
 simd-adler32 = "0.3.4"
 
 [dev-dependencies]
-criterion = "0.3"
-flate2 = { version = "1.0.25", features = ["zlib"] }
 miniz_oxide = "0.7.1"
 rand = "0.8.5"
