@@ -114,20 +114,6 @@ const fn compute_codes<const NSYMS: usize>(lengths: &[u8; NSYMS]) -> Option<[u16
 
     if code == 2 << 16 {
         Some(codes)
-    // } else if code == 1 << 16 {
-    //     let mut nonzero_codes = 0;
-    //     let mut i = 0;
-    //     while i < lengths.len() {
-    //         if lengths[i] != 0 {
-    //             nonzero_codes += 1;
-    //         }
-    //         i += 1;
-    //     }
-    //     if nonzero_codes == 1 {
-    //         Some(codes)
-    //     } else {
-    //         None
-    //     }
     } else {
         None
     }
