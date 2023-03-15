@@ -1,6 +1,6 @@
 [package]
 name = "fdeflate"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 
 # note: when changed, also update test runner in `.github/workflows/rust.yml`
