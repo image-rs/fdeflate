@@ -138,6 +138,7 @@ pub struct Decompressor {
 
     state: State,
     checksum: Adler32,
+    ignore_adler32: bool,
 }
 
 impl Decompressor {
@@ -170,7 +171,12 @@ impl Decompressor {
             checksum: Adler32::new(),
             state: State::ZlibHeader,
             last_block: false,
+            ignore_adler32: false,
         }
+    }
+
+    pub fn ignore_adler32(&mut self) {
+        self.ignore_adler32 = true;
     }
 
     fn fill_buffer(&mut self, input: &mut &[u8]) {
@@ -937,7 +943,9 @@ impl Decompressor {
                             self.consume_bits(align_bits);
                         }
                         #[cfg(not(fuzzing))]
-                        if (self.peak_bits(32) as u32).swap_bytes() != self.checksum.finish() {
+                        if !self.ignore_adler32
+                            && (self.peak_bits(32) as u32).swap_bytes() != self.checksum.finish()
+                        {
                             return Err(DecompressionError::WrongChecksum);
                         }
                         self.state = State::Done;
@@ -949,7 +957,7 @@ impl Decompressor {
             }
         }
 
-        if self.state != State::Done {
+        if !self.ignore_adler32 && self.state != State::Done {
             self.checksum.write(&output[output_position..output_index]);
         }
 
@@ -996,7 +1004,6 @@ mod tests {
 
     use super::*;
     use rand::Rng;
-    use std::io::Read;
 
     fn roundtrip(data: &[u8]) {
         let compressed = crate::compress_to_vec(data);
@@ -1014,6 +1021,7 @@ mod tests {
         assert_eq!(&decompressed, data);
     }
 
+    #[allow(unused)]
     fn compare_decompression(data: &[u8]) {
         // let decompressed0 = flate2::read::ZlibDecoder::new(std::io::Cursor::new(&data))
         //     .bytes()
@@ -1112,5 +1120,26 @@ mod tests {
             println!("Random data: {:?}", data);
             roundtrip_miniz_oxide(&data);
         }
+    }
+
+    #[test]
+    fn ignore_adler32() {
+        let mut compressed = crate::compress_to_vec(b"Hello world!");
+        let last_byte = compressed.len() - 1;
+        compressed[last_byte] = compressed[last_byte].wrapping_add(1);
+
+        match decompress_to_vec(&compressed) {
+            Err(DecompressionError::WrongChecksum) => {}
+            r => panic!("expected WrongChecksum, got {:?}", r),
+        }
+
+        let mut decompressor = Decompressor::new();
+        decompressor.ignore_adler32();
+        let mut decompressed = vec![0; 1024];
+        let decompressed_len = decompressor
+            .read(&compressed, &mut decompressed, 0, true)
+            .unwrap()
+            .1;
+        assert_eq!(&decompressed[..decompressed_len], b"Hello world!");
     }
 }
