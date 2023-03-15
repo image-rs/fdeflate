@@ -7,6 +7,7 @@ use crate::tables::{
     FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
 };
 
+/// An error encountered while decompressing a deflate stream.
 #[derive(Debug)]
 pub enum DecompressionError {
     /// The zlib header is corrupt.
@@ -120,7 +121,7 @@ enum State {
     Done,
 }
 
-/// Decompressor that reads fdeflate compressed streams.
+/// Decompress zlib wrapped deflate streams.
 pub struct Decompressor {
     /// State for decoding a compressed block.
     compression: CompressedBlock,
@@ -175,6 +176,7 @@ impl Decompressor {
         }
     }
 
+    /// Ignore the checksum at the end of the stream.
     pub fn ignore_adler32(&mut self) {
         self.ignore_adler32 = true;
     }
@@ -970,7 +972,7 @@ impl Decompressor {
     }
 
     /// Returns true if the decompressor has finished decompressing the input.
-    pub fn done(&self) -> bool {
+    pub fn is_done(&self) -> bool {
         self.state == State::Done
     }
 }
@@ -981,7 +983,7 @@ pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
     let mut output = vec![0; 1024];
     let mut input_index = 0;
     let mut output_index = 0;
-    while !decoder.done() {
+    while !decoder.is_done() {
         let (consumed, produced) =
             decoder.read(&input[input_index..], &mut output, output_index, true)?;
         input_index += consumed;
