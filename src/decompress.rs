@@ -586,22 +586,23 @@ impl Decompressor {
                 break;
             }
 
-            let mut bits = self.buffer as usize;
-            let litlen_entry = self.compression.litlen_table[bits & 0xfff];
+            let mut bits = self.buffer;
+            let litlen_entry = self.compression.litlen_table[(bits & 0xfff) as usize];
             let litlen_code_bits = litlen_entry as u8;
 
             if litlen_entry & LITERAL_ENTRY != 0 {
                 // Ultra-fast path: do 3 more consecutive table lookups and bail if any of them need the slow path.
                 if self.nbits >= 48 {
                     let litlen_entry2 =
-                        self.compression.litlen_table[bits >> litlen_code_bits & 0xfff];
+                        self.compression.litlen_table[(bits >> litlen_code_bits & 0xfff) as usize];
                     let litlen_code_bits2 = litlen_entry2 as u8;
                     let litlen_entry3 = self.compression.litlen_table
-                        [bits >> (litlen_code_bits + litlen_code_bits2) & 0xfff];
+                        [(bits >> (litlen_code_bits + litlen_code_bits2) & 0xfff) as usize];
                     let litlen_code_bits3 = litlen_entry3 as u8;
-                    let litlen_entry4 = self.compression.litlen_table[bits
+                    let litlen_entry4 = self.compression.litlen_table[(bits
                         >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3)
-                        & 0xfff];
+                        & 0xfff)
+                        as usize];
                     let litlen_code_bits4 = litlen_entry4 as u8;
                     if litlen_entry2 & litlen_entry3 & litlen_entry4 & LITERAL_ENTRY != 0 {
                         let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
@@ -692,7 +693,7 @@ impl Decompressor {
                 } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
                     let secondary_index = litlen_entry >> 16;
                     let secondary_entry = self.compression.secondary_table
-                        [secondary_index as usize + ((bits >> 12) & 0x7)];
+                        [secondary_index as usize + ((bits >> 12) & 0x7) as usize];
                     let litlen_symbol = secondary_entry >> 4;
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 
@@ -735,10 +736,10 @@ impl Decompressor {
             bits >>= litlen_code_bits;
 
             let length_extra_mask = (1 << length_extra_bits) - 1;
-            let length = length_base as usize + (bits & length_extra_mask);
+            let length = length_base as usize + (bits & length_extra_mask) as usize;
             bits >>= length_extra_bits;
 
-            let dist_entry = self.compression.dist_table[bits & 0x1ff];
+            let dist_entry = self.compression.dist_table[(bits & 0x1ff) as usize];
             let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry != 0 {
                 (
                     (dist_entry >> 16) as u16,
@@ -766,7 +767,7 @@ impl Decompressor {
             };
             bits >>= dist_code_bits;
 
-            let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1));
+            let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1)) as usize;
             let total_bits =
                 litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits;
 
