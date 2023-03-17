@@ -8,8 +8,18 @@
 //! - No distance codes except for run length encoding of zeros.
 //! - A single fixed huffman tree trained on a large corpus of PNG images.
 //! - All huffman codes are 12 bits or less.
-
+//!
+//! It also contains a fast decompressor that supports arbitrary zlib streams but does especially
+//! well on streams that meet the above assumptions.
+//!
+//! # Inspiration
+//!
+//! The algorithms in this crate take inspiration from multiple sources:
+//! * [fpnge](https://github.com/veluca93/fpnge)
+//! * [zune-inflate](https://github.com/etemesi254/zune-image/tree/main/zune-inflate)
+//! * [RealTime Data Compression blog](https://fastcompression.blogspot.com/2015/10/huffman-revisited-part-4-multi-bytes.html)
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 mod compress;
 mod decompress;
@@ -21,6 +31,7 @@ pub use decompress::{decompress_to_vec, DecompressionError, Decompressor};
 /// Build a length limited huffman tree.
 ///
 /// Dynamic programming algorithm from fpnge.
+#[doc(hidden)]
 pub fn compute_code_lengths(
     freqs: &[u64],
     min_limit: &[u8],

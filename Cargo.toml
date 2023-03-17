@@ -1,6 +1,6 @@
 [package]
 name = "fdeflate"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 
 # note: when changed, also update test runner in `.github/workflows/rust.yml`
@@ -20,6 +20,5 @@ categories = ["compression"]
 simd-adler32 = "0.3.4"
 
 [dev-dependencies]
-criterion = "0.3"
-miniz_oxide = "0.6.0"
+miniz_oxide = "0.7.1"
 rand = "0.8.5"

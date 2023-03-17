@@ -203,14 +203,10 @@ impl<W: Write> Compressor<W> {
     }
 }
 
-/// Specialized compressor that only supports the stored blocks.
+/// Compressor that only writes the stored blocks.
 ///
 /// This is useful for writing files that are not compressed, but still need to be wrapped in a
 /// zlib stream.
-///
-/// NOTE: This crate cannot currently decompress stream compressed with this method and attempting
-/// to do so will result in
-/// [`DecompressionError::NotFDeflate`](enum.DecompressionError.html#variant.NotFDeflate).
 pub struct StoredOnlyCompressor<W> {
     writer: W,
     checksum: Adler32,
@@ -286,7 +282,7 @@ impl<W> StoredOnlyCompressor<W> {
     }
 }
 
-/// Compresses the given data using the zlib format.
+/// Compresses the given data.
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
     let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
     compressor.write_data(input).unwrap();
