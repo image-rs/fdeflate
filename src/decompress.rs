@@ -121,7 +121,7 @@ enum State {
     Done,
 }
 
-/// Decompress zlib wrapped deflate streams.
+/// Decompressor for arbitrary zlib streams.
 pub struct Decompressor {
     /// State for decoding a compressed block.
     compression: CompressedBlock,
@@ -978,7 +978,7 @@ impl Decompressor {
     }
 }
 
-/// Decompresses the given input. Returns an error if the input is invalid.
+/// Decompress the given data.
 pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
     let mut decoder = Decompressor::new();
     let mut output = vec![0; 1024];
