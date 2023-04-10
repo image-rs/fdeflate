@@ -11,7 +11,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 flate2 = { version = "1.0", features = [] }
-miniz_oxide = { version = "0.7.1", features = ["std"] }
+miniz_oxide = { version = "0.7.1", features = ["std", "simd"] }
 
 [dependencies.fdeflate]
 path = ".."
@@ -35,5 +35,11 @@ doc = false
 [[bin]]
 name = "inflate"
 path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "inflate_miniz"
+path = "fuzz_targets/inflate_miniz.rs"
 test = false
 doc = false
