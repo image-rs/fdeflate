@@ -15,10 +15,9 @@ jobs:
         rust: ["1.57.0", stable, beta, nightly]
     steps:
     - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@v1
       with:
         toolchain: ${{ matrix.rust }}
-        override: true
     - name: Cache Cargo Dependencies
       uses: Swatinem/rust-cache@v2
       with:
@@ -41,7 +40,7 @@ jobs:
     # github actions does not support big endian systems directly, but it does support QEMU.
     # so we install qemu, then build and run the tests in an emulated mips system.
     # note: you can also use this approach to test for big endian locally.
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     # we are using the cross project for cross compilation to mips:
     # https://github.com/cross-rs/cross
@@ -80,26 +79,17 @@ jobs:
     - name: install-dependencies
       run: sudo apt update && sudo apt install ninja-build meson nasm
     - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
-        override: true
         components: clippy
-    - uses: actions-rs/cargo@v1
-      with:
-        args: clippy --all-features -- -D warnings
-      env:
-        SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: always
+    - run: cargo clippy --all-features -- -D warnings
 
   build_fuzz_cargo-fuzz:
     name: "Fuzz targets (cargo-fuzz)"
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: nightly
-        override: true
+    - uses: dtolnay/rust-toolchain@nightly
     - name: build
       run: |
         cargo install cargo-fuzz
@@ -114,16 +104,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
-        override: true
         components: rustfmt
     - name: Run rustfmt check
-      uses: actions-rs/cargo@v1
-      with:
-        command: fmt
-        args: -- --check
+      run: cargo fmt -- --check
 
   cargo-deny:
     runs-on: ubuntu-20.04
