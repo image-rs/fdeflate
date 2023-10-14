@@ -144,6 +144,12 @@ pub struct Decompressor {
     ignore_adler32: bool,
 }
 
+impl Default for Decompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Decompressor {
     /// Create a new decompressor.
     pub fn new() -> Self {
@@ -236,14 +242,14 @@ impl Decompressor {
                 self.state = State::UncompressedData;
                 self.uncompressed_bytes_left = len;
                 self.consume_bits(header_bits);
-                return Ok(());
+                Ok(())
             }
             0b01 => {
                 self.consume_bits(3);
                 // TODO: Do this statically rather than every time.
                 Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression, 6)?;
                 self.state = State::CompressedData;
-                return Ok(());
+                Ok(())
             }
             0b10 => {
                 if self.nbits < 17 {
@@ -262,9 +268,9 @@ impl Decompressor {
 
                 self.consume_bits(17);
                 self.state = State::CodeLengthCodes;
-                return Ok(());
+                Ok(())
             }
-            0b11 => return Err(DecompressionError::InvalidBlockType),
+            0b11 => Err(DecompressionError::InvalidBlockType),
             _ => unreachable!(),
         }
     }
@@ -289,9 +295,8 @@ impl Decompressor {
                 self.fill_buffer(remaining_input);
             }
         }
-        let code_length_codes: [u16; 19] =
-            crate::compute_codes(&code_length_lengths.try_into().unwrap())
-                .ok_or(DecompressionError::BadCodeLengthHuffmanTree)?;
+        let code_length_codes: [u16; 19] = crate::compute_codes(&code_length_lengths)
+            .ok_or(DecompressionError::BadCodeLengthHuffmanTree)?;
 
         self.header.table = [255; 128];
         for i in 0..19 {
@@ -307,7 +312,7 @@ impl Decompressor {
 
         self.state = State::CodeLengths;
         self.header.num_lengths_read = 0;
-        return Ok(());
+        Ok(())
     }
 
     fn read_code_lengths(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
@@ -330,7 +335,7 @@ impl Decompressor {
                     self.header.num_lengths_read += 1;
                     self.consume_bits(length);
                 }
-                16 | 17 | 18 => {
+                16..=18 => {
                     let (base_repeat, extra_bits) = match symbol {
                         16 => (3, 2),
                         17 => (3, 3),
@@ -468,8 +473,8 @@ impl Decompressor {
                 let mut j = code;
                 while j < 4096 {
                     compression.litlen_table[j as usize] = if i < 286 {
-                        (LEN_SYM_TO_LEN_BASE[i as usize - 257] as u32) << 16
-                            | (LEN_SYM_TO_LEN_EXTRA[i as usize - 257] as u32) << 8
+                        (LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16
+                            | (LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8
                             | length as u32
                     } else {
                         EXCEPTIONAL_ENTRY
@@ -711,7 +716,7 @@ impl Decompressor {
 
                     (
                         LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
-                        LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257] as u8,
+                        LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257],
                         litlen_code_bits,
                     )
                 } else if litlen_code_bits == 0 {
@@ -863,7 +868,7 @@ impl Decompressor {
 
         assert!(output.len() > output_position);
 
-        let mut remaining_input = &input[..];
+        let mut remaining_input = input;
         let mut output_index = output_position;
 
         if let Some((data, len)) = self.queued_rle.take() {
