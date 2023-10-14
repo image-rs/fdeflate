@@ -875,21 +875,22 @@ impl Decompressor {
             last_state = Some(self.state);
             match self.state {
                 State::ZlibHeader => {
-                    if input.len() < 2 && !end_of_input {
-                        return Ok((0, 0));
-                    } else if input.len() < 2 {
-                        return Err(DecompressionError::InsufficientInput);
+                    self.fill_buffer(&mut remaining_input);
+                    if self.nbits < 16 {
+                        break;
                     }
 
-                    if input[0] & 0x0f != 0x08
-                        || (input[0] & 0xf0) > 0x70
-                        || input[1] & 0x20 != 0
-                        || u16::from_be_bytes(input[..2].try_into().unwrap()) % 31 != 0
+                    let input0 = self.peak_bits(8);
+                    let input1 = self.peak_bits(16) >> 8 & 0xff;
+                    if input0 & 0x0f != 0x08
+                        || (input0 & 0xf0) > 0x70
+                        || input1 & 0x20 != 0
+                        || (input0 << 8 | input1) % 31 != 0
                     {
                         return Err(DecompressionError::BadZlibHeader);
                     }
 
-                    remaining_input = &remaining_input[2..];
+                    self.consume_bits(16);
                     self.state = State::BlockHeader;
                 }
                 State::BlockHeader => {
