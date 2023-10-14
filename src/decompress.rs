@@ -182,17 +182,17 @@ impl Decompressor {
     }
 
     fn fill_buffer(&mut self, input: &mut &[u8]) {
-        if self.nbits == 64 {
-            /* do nothing */
-        } else if input.len() >= 8 {
+        if input.len() >= 8 {
             self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << self.nbits;
             *input = &mut &input[(63 - self.nbits as usize) / 8..];
             self.nbits |= 56;
         } else {
-            let nbytes = input.len().min((64 - self.nbits as usize) / 8);
+            let nbytes = input.len().min((63 - self.nbits as usize) / 8);
             let mut input_data = [0; 8];
             input_data[..nbytes].copy_from_slice(&input[..nbytes]);
-            self.buffer |= u64::from_le_bytes(input_data) << self.nbits;
+            self.buffer |= u64::from_le_bytes(input_data)
+                .checked_shl(self.nbits as u32)
+                .unwrap_or(0);
             self.nbits += nbytes as u8 * 8;
             *input = &mut &input[nbytes..];
         }
