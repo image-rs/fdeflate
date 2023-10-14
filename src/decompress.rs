@@ -1012,11 +1012,14 @@ pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
     let mut output = vec![0; 1024];
     let mut input_index = 0;
     let mut output_index = 0;
-    while !decoder.is_done() {
+    loop {
         let (consumed, produced) =
             decoder.read(&input[input_index..], &mut output, output_index, true)?;
         input_index += consumed;
         output_index += produced;
+        if decoder.is_done() {
+            break;
+        }
         output.resize(output_index + 32 * 1024, 0);
     }
     output.resize(output_index, 0);
