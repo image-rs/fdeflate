@@ -573,21 +573,11 @@ impl Decompressor {
         mut output_index: usize,
     ) -> Result<usize, DecompressionError> {
         while let State::CompressedData = self.state {
-            self.fill_buffer(remaining_input);
-            if self.nbits < 33 || output_index == output.len() {
-                if self.nbits >= 15
-                    && self.peak_bits(15) as u16 & self.compression.eof_mask
-                        == self.compression.eof_code
-                {
-                    // println!("[{output_index}] EOF");
-                    self.consume_bits(self.compression.eof_bits);
-                    self.state = match self.last_block {
-                        true => State::Checksum,
-                        false => State::BlockHeader,
-                    };
-                }
+            if output_index == output.len() {
                 break;
             }
+
+            self.fill_buffer(remaining_input);
 
             let mut bits = self.buffer;
             let litlen_entry = self.compression.litlen_table[(bits & 0xfff) as usize];
@@ -662,19 +652,14 @@ impl Decompressor {
                 //     ),
                 // }
 
-                if output_index + 1 < output.len() {
+                if self.nbits < litlen_code_bits {
+                    break;
+                } else if output_index + 1 < output.len() {
                     output[output_index] = (litlen_entry >> 16) as u8;
                     output[output_index + 1] = (litlen_entry >> 24) as u8;
                     output_index += advance_output_bytes;
                     self.consume_bits(litlen_code_bits);
-
-                    // if output_index > output.len() {
-                    //     self.queued_rle = Some((0, output_index - output.len()));
-                    //     output_index = output.len();
-                    //     break;
-                    // } else {
                     continue;
-                    // }
                 } else if output_index + advance_output_bytes == output.len() {
                     debug_assert_eq!(advance_output_bytes, 1);
                     output[output_index] = (litlen_entry >> 16) as u8;
@@ -682,6 +667,11 @@ impl Decompressor {
                     self.consume_bits(litlen_code_bits);
                     break;
                 } else {
+                    debug_assert_eq!(advance_output_bytes, 2);
+                    output[output_index] = (litlen_entry >> 16) as u8;
+                    self.queued_rle = Some(((litlen_entry >> 24) as u8, 1));
+                    output_index += 1;
+                    self.consume_bits(litlen_code_bits);
                     break;
                 }
             }
@@ -700,10 +690,9 @@ impl Decompressor {
                     let litlen_symbol = secondary_entry >> 4;
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 
-                    if litlen_symbol < 256 {
-                        if output_index == output.len() {
-                            break;
-                        }
+                    if self.nbits < litlen_code_bits {
+                        break;
+                    } else if litlen_symbol < 256 {
                         // println!("[{output_index}] LIT1b {} (val={:04x})", litlen_symbol, self.peak_bits(15));
 
                         self.consume_bits(litlen_code_bits);
@@ -728,6 +717,9 @@ impl Decompressor {
                 } else if litlen_code_bits == 0 {
                     return Err(DecompressionError::InvalidLiteralLengthCode);
                 } else {
+                    if self.nbits < litlen_code_bits {
+                        break;
+                    }
                     // println!("[{output_index}] EOF");
                     self.consume_bits(litlen_code_bits);
                     self.state = match self.last_block {
@@ -823,15 +815,41 @@ impl Decompressor {
             output_index += copy_length;
         }
 
+        if self.state == State::CompressedData
+            && self.queued_backref.is_none()
+            && self.queued_rle.is_none()
+            && self.nbits >= 15
+            && self.peak_bits(15) as u16 & self.compression.eof_mask == self.compression.eof_code
+        {
+            self.consume_bits(self.compression.eof_bits);
+            self.state = match self.last_block {
+                true => State::Checksum,
+                false => State::BlockHeader,
+            };
+        }
+
         Ok(output_index)
     }
 
     /// Decompresses a chunk of data.
     ///
     /// Returns the number of bytes read from `input` and the number of bytes written to `output`,
-    /// or an error if the deflate stream is not valid. `input` is the compressed data. `output`
-    /// is the buffer to write the decompressed data to. `end_of_input` indicates whether more
-    /// data may be available in the future.
+    /// or an error if the deflate stream is not valid. `input` is the compressed data. `output` is
+    /// the buffer to write the decompressed data to, starting at index `output_position`.
+    /// `end_of_input` indicates whether more data may be available in the future.
+    ///
+    /// The contents of `output` after `output_position` are ignored. However, this function may
+    /// write additional data to `output` past what is indicated by the return value.
+    ///
+    /// When this function returns `Ok`, at least one of the following is true:
+    /// - The input is fully consumed.
+    /// - The output is full.
+    /// - The deflate stream is complete (and `is_done` will return true).
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if there is no space in `output` beyond index `output_position` or
+    /// if `output_position` is out of bounds.
     pub fn read(
         &mut self,
         input: &[u8],
@@ -843,7 +861,7 @@ impl Decompressor {
             return Ok((0, 0));
         }
 
-        assert!(output.len() >= output_position + 2);
+        assert!(output.len() > output_position);
 
         let mut remaining_input = &input[..];
         let mut output_index = output_position;
