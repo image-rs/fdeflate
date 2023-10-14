@@ -48,6 +48,7 @@ pub enum DecompressionError {
 struct BlockHeader {
     hlit: usize,
     hdist: usize,
+    hclen: usize,
     num_lengths_read: usize,
 
     /// Low 3-bits are code length code length, high 5-bits are code length code.
@@ -110,10 +111,11 @@ const FDEFLATE_COMPRESSED_BLOCK: CompressedBlock = CompressedBlock {
     eof_bits: 0xc,
 };
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum State {
     ZlibHeader,
     BlockHeader,
+    CodeLengthCodes,
     CodeLengths,
     CompressedData,
     UncompressedData,
@@ -162,6 +164,7 @@ impl Decompressor {
             header: BlockHeader {
                 hlit: 0,
                 hdist: 0,
+                hclen: 0,
                 table: [0; 128],
                 num_lengths_read: 0,
                 code_lengths: [0; 320],
@@ -208,23 +211,7 @@ impl Decompressor {
         self.nbits -= nbits;
     }
 
-    fn read_bits(&mut self, nbits: u8, input: &mut &[u8]) -> Option<u64> {
-        if self.nbits < nbits {
-            self.fill_buffer(input);
-            if self.nbits < nbits {
-                return None;
-            }
-        }
-
-        let result = self.peak_bits(nbits);
-        self.consume_bits(nbits);
-        Some(result)
-    }
-
-    fn read_block_header(
-        &mut self,
-        mut remaining_input: &mut &[u8],
-    ) -> Result<(), DecompressionError> {
+    fn read_block_header(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
         self.fill_buffer(remaining_input);
         if self.nbits < 3 {
             return Ok(());
@@ -262,13 +249,10 @@ impl Decompressor {
                 if self.nbits < 17 {
                     return Ok(());
                 }
-                let hclen = (self.peak_bits(17) >> 13) as usize + 4;
-                if self.nbits as usize + remaining_input.len() * 8 < 17 + 3 * hclen {
-                    return Ok(());
-                }
 
                 self.header.hlit = (self.peak_bits(8) >> 3) as usize + 257;
                 self.header.hdist = (self.peak_bits(13) >> 8) as usize + 1;
+                self.header.hclen = (self.peak_bits(17) >> 13) as usize + 4;
                 if self.header.hlit > 286 {
                     return Err(DecompressionError::InvalidHlit);
                 }
@@ -277,34 +261,53 @@ impl Decompressor {
                 }
 
                 self.consume_bits(17);
-                let mut code_length_lengths = [0; 19];
-                for i in 0..hclen {
-                    code_length_lengths[CLCL_ORDER[i]] =
-                        self.read_bits(3, &mut remaining_input).unwrap() as u8;
-                }
-                let code_length_codes: [u16; 19] =
-                    crate::compute_codes(&code_length_lengths.try_into().unwrap())
-                        .ok_or(DecompressionError::BadCodeLengthHuffmanTree)?;
-
-                self.header.table = [255; 128];
-                for i in 0..19 {
-                    let length = code_length_lengths[i];
-                    if length > 0 {
-                        let mut j = code_length_codes[i];
-                        while j < 128 {
-                            self.header.table[j as usize] = ((i as u8) << 3) | length;
-                            j += 1 << length;
-                        }
-                    }
-                }
-
-                self.state = State::CodeLengths;
-                self.header.num_lengths_read = 0;
+                self.state = State::CodeLengthCodes;
                 return Ok(());
             }
             0b11 => return Err(DecompressionError::InvalidBlockType),
             _ => unreachable!(),
         }
+    }
+
+    fn read_code_length_codes(
+        &mut self,
+        remaining_input: &mut &[u8],
+    ) -> Result<(), DecompressionError> {
+        self.fill_buffer(remaining_input);
+        if self.nbits as usize + remaining_input.len() * 8 < 3 * self.header.hclen {
+            return Ok(());
+        }
+
+        let mut code_length_lengths = [0; 19];
+        for i in 0..self.header.hclen {
+            code_length_lengths[CLCL_ORDER[i]] = self.peak_bits(3) as u8;
+            self.consume_bits(3);
+
+            // We need to refill the buffer after reading 3 * 18 = 54 bits since the buffer holds
+            // between 56 and 63 bits total.
+            if i == 17 {
+                self.fill_buffer(remaining_input);
+            }
+        }
+        let code_length_codes: [u16; 19] =
+            crate::compute_codes(&code_length_lengths.try_into().unwrap())
+                .ok_or(DecompressionError::BadCodeLengthHuffmanTree)?;
+
+        self.header.table = [255; 128];
+        for i in 0..19 {
+            let length = code_length_lengths[i];
+            if length > 0 {
+                let mut j = code_length_codes[i];
+                while j < 128 {
+                    self.header.table[j as usize] = ((i as u8) << 3) | length;
+                    j += 1 << length;
+                }
+            }
+        }
+
+        self.state = State::CodeLengths;
+        self.header.num_lengths_read = 0;
+        return Ok(());
     }
 
     fn read_code_lengths(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
@@ -891,6 +894,9 @@ impl Decompressor {
                 }
                 State::BlockHeader => {
                     self.read_block_header(&mut remaining_input)?;
+                }
+                State::CodeLengthCodes => {
+                    self.read_code_length_codes(&mut remaining_input)?;
                 }
                 State::CodeLengths => {
                     self.read_code_lengths(&mut remaining_input)?;
