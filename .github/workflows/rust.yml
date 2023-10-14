@@ -5,6 +5,8 @@ on:
     branches: [ main, next ]
   pull_request:
     branches: [ main, next ]
+  schedule:
+    - cron: '5 16 * * 6'
 
 jobs:
   build:
@@ -41,7 +43,7 @@ jobs:
     # github actions does not support big endian systems directly, but it does support QEMU.
     # so we install qemu, then build and run the tests in an emulated mips system.
     # note: you can also use this approach to test for big endian locally.
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     # we are using the cross project for cross compilation to mips:
     # https://github.com/cross-rs/cross
@@ -75,7 +77,7 @@ jobs:
           FEATURES: ${{ matrix.features }}
 
   clippy:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
     - name: install-dependencies
       run: sudo apt update && sudo apt install ninja-build meson nasm
@@ -126,7 +128,7 @@ jobs:
         args: -- --check
 
   cargo-deny:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - uses: EmbarkStudios/cargo-deny-action@v1
