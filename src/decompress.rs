@@ -847,9 +847,7 @@ impl Decompressor {
 
         if let Some((data, len)) = self.queued_rle.take() {
             let n = len.min(output.len() - output_index);
-            if data != 0 {
-                output[output_index..][..n].fill(data);
-            }
+            output[output_index..][..n].fill(data);
             output_index += n;
             if n < len {
                 self.queued_rle = Some((data, len - n));
