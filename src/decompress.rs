@@ -8,7 +8,7 @@ use crate::tables::{
 };
 
 /// An error encountered while decompressing a deflate stream.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum DecompressionError {
     /// The zlib header is corrupt.
     BadZlibHeader,

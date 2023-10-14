@@ -43,3 +43,21 @@ name = "inflate_miniz"
 path = "fuzz_targets/inflate_miniz.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "inflate_bytewise"
+path = "fuzz_targets/inflate_bytewise.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "inflate_bytewise2"
+path = "fuzz_targets/inflate_bytewise2.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "inflate_split"
+path = "fuzz_targets/inflate_split.rs"
+test = false
+doc = false
