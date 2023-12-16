@@ -578,11 +578,10 @@ impl Decompressor {
         mut output_index: usize,
     ) -> Result<usize, DecompressionError> {
         while let State::CompressedData = self.state {
+            self.fill_buffer(remaining_input);
             if output_index == output.len() {
                 break;
             }
-
-            self.fill_buffer(remaining_input);
 
             let mut bits = self.buffer;
             let litlen_entry = self.compression.litlen_table[(bits & 0xfff) as usize];
@@ -848,13 +847,12 @@ impl Decompressor {
     ///
     /// When this function returns `Ok`, at least one of the following is true:
     /// - The input is fully consumed.
-    /// - The output is full.
+    /// - The output is full but there are more bytes to output.
     /// - The deflate stream is complete (and `is_done` will return true).
     ///
     /// # Panics
     ///
-    /// This function will panic if there is no space in `output` beyond index `output_position` or
-    /// if `output_position` is out of bounds.
+    /// This function will panic if `output_position` is out of bounds.
     pub fn read(
         &mut self,
         input: &[u8],
@@ -866,7 +864,7 @@ impl Decompressor {
             return Ok((0, 0));
         }
 
-        assert!(output.len() > output_position);
+        assert!(output_position <= output.len());
 
         let mut remaining_input = input;
         let mut output_index = output_position;
@@ -1175,5 +1173,62 @@ mod tests {
             .unwrap()
             .1;
         assert_eq!(&decompressed[..decompressed_len], b"Hello world!");
+    }
+
+    #[test]
+    fn checksum_after_eof() {
+        let input = b"Hello world!";
+        let compressed = crate::compress_to_vec(input);
+
+        let mut decompressor = Decompressor::new();
+        let mut decompressed = vec![0; 1024];
+        let (input_consumed, output_written) = decompressor
+            .read(
+                &compressed[..compressed.len() - 1],
+                &mut decompressed,
+                0,
+                false,
+            )
+            .unwrap();
+        assert_eq!(output_written, input.len());
+        assert_eq!(input_consumed, compressed.len() - 1);
+
+        let (input_consumed, output_written) = decompressor
+            .read(
+                &compressed[input_consumed..],
+                &mut decompressed[..output_written],
+                output_written,
+                true,
+            )
+            .unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, 1);
+        assert_eq!(output_written, 0);
+
+        assert_eq!(&decompressed[..input.len()], input);
+    }
+
+    #[test]
+    fn zero_length() {
+        let mut compressed = crate::compress_to_vec(b"").to_vec();
+
+        // Splice in zero-length non-compressed blocks.
+        for _ in 0..10 {
+            println!("compressed len: {}", compressed.len());
+            compressed.splice(2..2, [0u8, 0, 0, 0xff, 0xff].into_iter());
+        }
+
+        // Ensure that the full input is decompressed, regardless of whether
+        // `end_of_input` is set.
+        for end_of_input in [true, false] {
+            let mut decompressor = Decompressor::new();
+            let (input_consumed, output_written) = decompressor
+                .read(&compressed, &mut [], 0, end_of_input)
+                .unwrap();
+
+            assert!(decompressor.is_done());
+            assert_eq!(input_consumed, compressed.len());
+            assert_eq!(output_written, 0);
+        }
     }
 }
