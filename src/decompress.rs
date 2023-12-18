@@ -1006,8 +1006,38 @@ impl Decompressor {
 
 /// Decompress the given data.
 pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
+    match decompress_to_vec_bounded(input, usize::MAX) {
+        Ok(output) => Ok(output),
+        Err(BoundedDecompressionError::DecompressionError { inner }) => Err(inner),
+        Err(BoundedDecompressionError::OutputTooLarge { .. }) => {
+            unreachable!("Impossible to allocate more than isize::MAX bytes")
+        }
+    }
+}
+
+// An error encountered while decompressing a deflate stream given a bounded
+// maximum output.
+pub enum BoundedDecompressionError {
+    /// The input is not a valid deflate stream.
+    DecompressionError { inner: DecompressionError },
+
+    /// The output is too large.
+    OutputTooLarge { partial_output: Vec<u8> },
+}
+impl From<DecompressionError> for BoundedDecompressionError {
+    fn from(inner: DecompressionError) -> Self {
+        BoundedDecompressionError::DecompressionError { inner }
+    }
+}
+
+/// Decompress the given data, returning an error if the output is larger than
+/// `maxlen` bytes.
+pub fn decompress_to_vec_bounded(
+    input: &[u8],
+    maxlen: usize,
+) -> Result<Vec<u8>, BoundedDecompressionError> {
     let mut decoder = Decompressor::new();
-    let mut output = vec![0; 1024];
+    let mut output = vec![0; 1024.min(maxlen)];
     let mut input_index = 0;
     let mut output_index = 0;
     loop {
@@ -1015,19 +1045,20 @@ pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
             decoder.read(&input[input_index..], &mut output, output_index, true)?;
         input_index += consumed;
         output_index += produced;
-        if decoder.is_done() {
+        if decoder.is_done() || output_index == maxlen {
             break;
         }
-        output.resize(output_index + 32 * 1024, 0);
+        output.resize((output_index + 32 * 1024).min(maxlen), 0);
     }
     output.resize(output_index, 0);
 
-    // if input_index != input.len() {
-    //     println!("extra input: {} bytes", input.len() - input_index);
-    //     Err(DecompressionError::ExtraInput)
-    // } else {
-    Ok(output)
-    // }
+    if decoder.is_done() {
+        Ok(output)
+    } else {
+        Err(BoundedDecompressionError::OutputTooLarge {
+            partial_output: output,
+        })
+    }
 }
 
 #[cfg(test)]
