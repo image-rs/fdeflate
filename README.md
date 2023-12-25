@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/fdeflate.svg)](https://crates.io/crates/fdeflate)
 [![Documentation](https://docs.rs/fdeflate/badge.svg)](https://docs.rs/fdeflate)
-[![Build Status](https://github.com/image-rs/fdeflate/workflows/Rust%20CI/badge.svg)](https://github.com/image-rs/fdeflate/actions)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/image-rs/fdeflate/rust.yml?label=Rust%20CI)](https://github.com/image-rs/fdeflate/actions)
 
 A fast deflate implementation.
 
