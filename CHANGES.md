@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+
+- Allow decoding into buffers without extra space.
+- Add `decompress_to_vec_bounded` method.
+
 ## 0.3.1
 
 - Strengthen postconditions on `Decompressor::read`.
