@@ -1,6 +1,6 @@
 [package]
 name = "fdeflate"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 
 # note: when changed, also update test runner in `.github/workflows/rust.yml`
@@ -9,6 +9,7 @@ rust-version = "1.57.0"
 license = "MIT OR Apache-2.0"
 description = "Fast specialized deflate implementation"
 authors = ["The image-rs Developers"]
+include = ["/src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 # crates.io metadata
 documentation = "https://docs.rs/fdeflate"
