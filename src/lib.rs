@@ -26,7 +26,10 @@ mod decompress;
 mod tables;
 
 pub use compress::{compress_to_vec, Compressor, StoredOnlyCompressor};
-pub use decompress::{decompress_to_vec, DecompressionError, Decompressor};
+pub use decompress::{
+    decompress_to_vec, decompress_to_vec_bounded, BoundedDecompressionError, DecompressionError,
+    Decompressor,
+};
 
 /// Build a length limited huffman tree.
 ///

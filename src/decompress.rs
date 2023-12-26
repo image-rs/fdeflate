@@ -1015,14 +1015,19 @@ pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
     }
 }
 
-// An error encountered while decompressing a deflate stream given a bounded
-// maximum output.
+/// An error encountered while decompressing a deflate stream given a bounded maximum output.
 pub enum BoundedDecompressionError {
     /// The input is not a valid deflate stream.
-    DecompressionError { inner: DecompressionError },
+    DecompressionError {
+        /// The underlying error.
+        inner: DecompressionError,
+    },
 
     /// The output is too large.
-    OutputTooLarge { partial_output: Vec<u8> },
+    OutputTooLarge {
+        /// The output decoded so far.
+        partial_output: Vec<u8>,
+    },
 }
 impl From<DecompressionError> for BoundedDecompressionError {
     fn from(inner: DecompressionError) -> Self {
