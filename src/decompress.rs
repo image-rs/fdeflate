@@ -990,7 +990,7 @@ impl Decompressor {
             self.checksum.write(&output[output_position..output_index]);
         }
 
-        if self.state == State::Done || !end_of_input || output_index >= output.len() - 1 {
+        if self.state == State::Done || !end_of_input || output_index == output.len() {
             let input_left = remaining_input.len();
             Ok((input.len() - input_left, output_index - output_position))
         } else {
