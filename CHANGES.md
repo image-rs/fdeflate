@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.4
+
+- Fix bug where `Decompressor::read` might fail to return an error for a
+  truncated deflate stream if the output buffer had room for exactly one more
+  byte of data.
+
 ## 0.3.3
 
 - Add `decompress_to_vec_bounded` method.
