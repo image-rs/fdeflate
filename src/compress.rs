@@ -1,8 +1,5 @@
 use simd_adler32::Adler32;
-use std::{
-    convert::TryInto,
-    io::{self, Seek, SeekFrom, Write},
-};
+use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::tables::{
     BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
