@@ -226,31 +226,6 @@ impl<W: Write> Compressor<W> {
     }
 }
 
-// pub struct ParallelCompressor<W: Write> {
-//     checksum: Adler32,
-//     buffer: u64,
-//     nbits: u8,
-//     writer: W,
-// }
-
-// impl<W: Write> ParallelCompressor<W> {
-//     /// Create a new Compressor.
-//     pub fn new(writer: W) -> io::Result<Self> {
-//         let mut compressor = Self {
-//             checksum: Adler32::new(),
-//             buffer: 0,
-//             nbits: 0,
-//             writer,
-//         };
-//         compressor.write_headers()?;
-//         Ok(compressor)
-//     }
-
-//     pub fn write_data(&mut self, impl) -> io::Result<()> {
-//    let block_header = [236, 192, 3, 160, 36, 89, 150, 198, 241, 255, 119, 238, 141, 200, 204, 167, 114, 75, 99, 174, 109, 219, 182, 109, 219, 182, 109, 219, 182, 109, 105, 140, 158, 150, 74, 175, 158, 50, 51, 34, 238, 249, 118, 183, 106, 122, 166, 135, 59, 107, 213, 15];
-//     }
-// }
-
 /// Compressor that only writes the stored blocks.
 ///
 /// This is useful for writing files that are not compressed, but still need to be wrapped in a
