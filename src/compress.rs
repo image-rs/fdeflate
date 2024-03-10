@@ -2,8 +2,7 @@ use simd_adler32::Adler32;
 use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::tables::{
-    BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS,
-    LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
+    BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
 };
 
 /// Compressor that produces fdeflate compressed streams.
