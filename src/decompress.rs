@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 use simd_adler32::Adler32;
 
 use crate::tables::{
@@ -193,7 +191,7 @@ impl Decompressor {
     fn fill_buffer(&mut self, input: &mut &[u8]) {
         if input.len() >= 8 {
             self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << self.nbits;
-            *input = &mut &input[(63 - self.nbits as usize) / 8..];
+            *input = &input[(63 - self.nbits as usize) / 8..];
             self.nbits |= 56;
         } else {
             let nbytes = input.len().min((63 - self.nbits as usize) / 8);
@@ -203,7 +201,7 @@ impl Decompressor {
                 .checked_shl(self.nbits as u32)
                 .unwrap_or(0);
             self.nbits += nbytes as u8 * 8;
-            *input = &mut &input[nbytes..];
+            *input = &input[nbytes..];
         }
     }
 
@@ -1068,7 +1066,7 @@ pub fn decompress_to_vec_bounded(
 
 #[cfg(test)]
 mod tests {
-    use crate::tables::{self, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL};
+    use crate::tables::{LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL};
 
     use super::*;
     use rand::Rng;
@@ -1084,7 +1082,7 @@ mod tests {
         let decompressed = decompress_to_vec(&compressed).unwrap();
         assert_eq!(decompressed.len(), data.len());
         for (i, (a, b)) in decompressed.chunks(1).zip(data.chunks(1)).enumerate() {
-            assert_eq!(a, b, "chunk {}..{}", i * 1, i * 1 + 1);
+            assert_eq!(a, b, "chunk {}..{}", i, i + 1);
         }
         assert_eq!(&decompressed, data);
     }
@@ -1095,8 +1093,8 @@ mod tests {
         //     .bytes()
         //     .collect::<Result<Vec<_>, _>>()
         //     .unwrap();
-        let decompressed = decompress_to_vec(&data).unwrap();
-        let decompressed2 = miniz_oxide::inflate::decompress_to_vec_zlib(&data).unwrap();
+        let decompressed = decompress_to_vec(data).unwrap();
+        let decompressed2 = miniz_oxide::inflate::decompress_to_vec_zlib(data).unwrap();
         for i in 0..decompressed.len().min(decompressed2.len()) {
             if decompressed[i] != decompressed2[i] {
                 panic!(
@@ -1171,7 +1169,7 @@ mod tests {
 
     #[test]
     fn constant() {
-        roundtrip_miniz_oxide(&vec![0; 50]);
+        roundtrip_miniz_oxide(&[0; 50]);
         roundtrip_miniz_oxide(&vec![5; 2048]);
         roundtrip_miniz_oxide(&vec![128; 2048]);
         roundtrip_miniz_oxide(&vec![254; 2048]);

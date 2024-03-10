@@ -10,8 +10,8 @@ fn bench_compute_code_lengths(b: &mut test::Bencher) {
     const N: usize = 48;
     let mut rng = rand::thread_rng();
     let mut freqs = vec![0; N];
-    for i in 0..freqs.len() {
-        freqs[i] = rng.gen_range::<u64, _>(1..1000);
+    for f in freqs.iter_mut() {
+        *f = rng.gen_range::<u64, _>(1..1000);
     }
 
     b.iter(|| {
