@@ -743,7 +743,7 @@ impl Decompressor {
                     (dist_entry >> 8) as u8,
                     dist_entry as u8,
                 )
-            } else {
+            } else if self.nbits > litlen_code_bits + length_extra_bits + 9 {
                 let mut dist_extra_bits = 0;
                 let mut dist_base = 0;
                 let mut dist_advance_bits = 0;
@@ -761,6 +761,8 @@ impl Decompressor {
                     return Err(DecompressionError::InvalidDistanceCode);
                 }
                 (dist_base, dist_extra_bits, dist_advance_bits)
+            } else {
+                break;
             };
             bits >>= dist_code_bits;
 
