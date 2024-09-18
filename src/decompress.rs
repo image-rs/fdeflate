@@ -408,6 +408,11 @@ impl Decompressor {
         compression: &mut CompressedBlock,
         max_search_bits: u8,
     ) -> Result<(), DecompressionError> {
+        // If there is no code assigned for the EOF symbol then the bitstream is invalid.
+        if code_lengths[256] == 0 {
+            return Err(DecompressionError::BadLiteralLengthHuffmanTree);
+        }
+
         // Build the literal/length code table.
         let lengths = &code_lengths[..288];
         let codes: [u16; 288] = crate::compute_codes(&lengths.try_into().unwrap())
