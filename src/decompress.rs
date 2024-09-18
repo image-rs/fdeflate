@@ -410,6 +410,7 @@ impl Decompressor {
     ) -> Result<(), DecompressionError> {
         // If there is no code assigned for the EOF symbol then the bitstream is invalid.
         if code_lengths[256] == 0 {
+            // TODO: Return a dedicated error in this case.
             return Err(DecompressionError::BadLiteralLengthHuffmanTree);
         }
 
