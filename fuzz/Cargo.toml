@@ -57,6 +57,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "inflate_bytewise3"
+path = "fuzz_targets/inflate_bytewise3.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "inflate_split"
 path = "fuzz_targets/inflate_split.rs"
 test = false
