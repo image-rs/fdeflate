@@ -56,6 +56,14 @@ path = "fuzz_targets/inflate_bytewise2.rs"
 test = false
 doc = false
 
+# TODO: Add `inflate_bytewise3` (once known issues are fixed - this is tracked
+# in https://github.com/image-rs/fdeflate/issues/25).
+#[[bin]]
+#name = "inflate_bytewise3"
+#path = "fuzz_targets/inflate_bytewise3.rs"
+#test = false
+#doc = false
+
 [[bin]]
 name = "inflate_split"
 path = "fuzz_targets/inflate_split.rs"

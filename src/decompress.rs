@@ -1,3 +1,5 @@
+use std::f128::consts::E;
+
 use simd_adler32::Adler32;
 
 use crate::tables::{
@@ -57,6 +59,9 @@ struct BlockHeader {
 const LITERAL_ENTRY: u32 = 0x8000;
 const EXCEPTIONAL_ENTRY: u32 = 0x4000;
 const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
+
+/// From RFC 1951, section 3.2.5.: "the value 256 indicates end-of-block".
+const END_OF_BLOCK: usize = 256;
 
 /// The Decompressor state for a compressed block.
 ///
@@ -330,6 +335,9 @@ impl Decompressor {
             match symbol {
                 0..=15 => {
                     self.header.code_lengths[self.header.num_lengths_read] = symbol;
+                    if self.header.num_lengths_read == END_OF_BLOCK && symbol == 0 {
+                        return Err(DecompressionError::BadLiteralLengthHuffmanTree);
+                    }
                     self.header.num_lengths_read += 1;
                     self.consume_bits(length);
                 }
@@ -460,9 +468,9 @@ impl Decompressor {
             compression.litlen_table.copy_within(0..table_size, i);
         }
 
-        compression.eof_code = codes[256];
-        compression.eof_mask = (1 << lengths[256]) - 1;
-        compression.eof_bits = lengths[256];
+        compression.eof_code = codes[END_OF_BLOCK];
+        compression.eof_mask = (1 << lengths[END_OF_BLOCK]) - 1;
+        compression.eof_bits = lengths[END_OF_BLOCK];
 
         for i in 257..hlit {
             let code = codes[i];
@@ -701,7 +709,7 @@ impl Decompressor {
                         output[output_index] = litlen_symbol as u8;
                         output_index += 1;
                         continue;
-                    } else if litlen_symbol == 256 {
+                    } else if litlen_symbol == END_OF_BLOCK {
                         // println!("[{output_index}] EOF");
                         self.consume_bits(litlen_code_bits);
                         self.state = match self.last_block {
@@ -1266,5 +1274,47 @@ mod tests {
             assert_eq!(input_consumed, compressed.len());
             assert_eq!(output_written, 0);
         }
+    }
+
+    mod test_utils;
+    use test_utils::{decompress_by_chunks, TestDecompressionError};
+
+    fn verify_no_sensitivity_to_input_chunking(
+        input: &[u8],
+    ) -> Result<Vec<u8>, TestDecompressionError> {
+        let r_whole = decompress_by_chunks(input, vec![input.len()], false);
+        let r_bytewise = decompress_by_chunks(input, std::iter::repeat(1), false);
+        assert_eq!(r_whole, r_bytewise);
+        r_whole // Returning an arbitrary result, since this is equal to `r_bytewise`.
+    }
+
+    /// This is a regression test found by the `buf_independent` fuzzer from the `png` crate.  When
+    /// this test case was found, the results were unexpectedly different when 1) decompressing the
+    /// whole input (successful result) vs 2) decompressing byte-by-byte
+    /// (`Err(InvalidDistanceCode)`).
+    #[test]
+    fn test_input_chunking_sensitivity_when_handling_distance_codes() {
+        let result = verify_no_sensitivity_to_input_chunking(include_bytes!(
+            "../tests/input-chunking-sensitivity-example1.zz"
+        ))
+        .unwrap();
+        assert_eq!(result.len(), 281);
+        assert_eq!(simd_adler32::adler32(&result.as_slice()), 751299);
+    }
+
+    /// This is a regression test found by the `inflate_bytewise3` fuzzer from the `fdeflate`
+    /// crate.  When this test case was found, the results were unexpectedly different when 1)
+    /// decompressing the whole input (`Err(DistanceTooFarBack)`) vs 2) decompressing byte-by-byte
+    /// (successful result)`).
+    #[test]
+    fn test_input_chunking_sensitivity_when_no_end_of_block_symbol() {
+        let err = verify_no_sensitivity_to_input_chunking(include_bytes!(
+            "../tests/input-chunking-sensitivity-example2.zz"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            TestDecompressionError::ProdError(DecompressionError::BadLiteralLengthHuffmanTree)
+        );
     }
 }
