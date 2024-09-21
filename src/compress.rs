@@ -135,6 +135,14 @@ fn build_huffman_tree(
     true
 }
 
+fn distance_to_dist_sym(distance: u16) -> u8 {
+    let mut dist_sym = 29;
+    while dist_sym > 0 && distance < DIST_SYM_TO_DIST_BASE[dist_sym as usize - 1] {
+        dist_sym -= 1;
+    }
+    dist_sym
+}
+
 fn hash(v: u64) -> u32 {
     (0x27220a95u64.wrapping_mul((v & 0xffff_ffff) ^ 0x56330698ec) >> 32) as u32
 }
@@ -142,7 +150,7 @@ fn hash2(v: u64) -> u32 {
     (0x330698ecu64.wrapping_mul(v ^ 0x27220a95) >> 32) as u32
 }
 
-const WAYS: usize = 16;
+const WAYS: usize = 1;
 const CACHE_SIZE: usize = 1 << 16;
 
 #[derive(Debug, Copy, Clone)]
@@ -201,6 +209,16 @@ impl CacheTable {
         }
 
         (best_offset, best_length as u16)
+    }
+
+    fn contains(&self, hash: u32) -> bool {
+        let entry = &self.entries[(hash as usize) % CACHE_SIZE];
+        for i in 0..WAYS {
+            if entry.tags[i] == hash {
+                return true;
+            }
+        }
+        false
     }
 
     fn insert(&mut self, hash: u32, offset: u32) {
@@ -295,16 +313,27 @@ impl<W: Write> Compressor<W> {
             },
         }
 
-        let mut lengths = HUFFMAN_LENGTHS;
-        let mut dist_lengths = [6u8; 30];
-        dist_lengths[0] = 1;
+        let mut short_matches = CacheTable::new();
+        let mut long_matches = CacheTable::new();
+        let mut last_match = 0;
+        let mut i = 0;
 
-        for n in 0..2 {
-            let mut matches = CacheTable::new();
+        while i < data.len() {
             let mut symbols = Vec::new();
 
-            let mut i = 0;
-            while i + 8 < data.len() {
+            let block_end = data.len().min(i + 64 * 1024 * 1024);
+
+            let mut lengths = HUFFMAN_LENGTHS;
+            let mut dist_lengths = [6u8; 30];
+            dist_lengths[0] = 1;
+
+            // for len in lengths.iter_mut().chain(dist_lengths.iter_mut()) {
+            //     if *len == 0 {
+            //         *len = 15;
+            //     }
+            // }
+
+            while i < block_end && i + 8 < data.len() {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
 
                 if current & 0xffff_ffff == 0 {
@@ -323,74 +352,92 @@ impl<W: Write> Compressor<W> {
                     continue;
                 }
 
-                let current_hash = hash(current);
-                let current_hash2 = hash2(current);
-                let (prev_i, length) = matches.get(data, i, current_hash as u32);
-                let (prev_i2, length2) = matches.get(data, i, current_hash2 as u32);
-                matches.insert(current_hash as u32, i as u32);
-                matches.insert(current_hash2 as u32, i as u32);
+                // Long hash
+                let long_hash = hash2(current);
+                let (prev_i, length) = long_matches.get(data, i, long_hash as u32);
+                if length >= 8 {
+                    for j in (i + length as usize - 8)..(i + length as usize).min(data.len() - 8) {
+                        let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                        short_matches.insert(hash(v), j as u32);
+                        long_matches.insert(hash2(v), j as u32);
+                    }
 
-                let (prev_i, length) = if length2 > length {
-                    (prev_i2, length2)
-                } else {
-                    (prev_i, length)
-                };
+                    let dist = (i - prev_i as usize) as u16;
+                    let dist_sym = distance_to_dist_sym(dist);
 
+                    symbols.push(Symbol::Backref {
+                        length: length as u16,
+                        distance: dist,
+                        dist_sym,
+                    });
+                    i += length as usize;
+                    last_match = i;
+                    continue;
+                }
+
+                // Short hash
+                let short_hash = hash(current);
+                let (prev_i, length) = short_matches.get(data, i, short_hash as u32);
+                short_matches.insert(short_hash as u32, i as u32);
+                long_matches.insert(long_hash as u32, i as u32);
                 if length >= 3 {
                     let next = u64::from_le_bytes(data[i + 1..][..8].try_into().unwrap());
-                    let next_length1 = matches.get(data, i + 1, hash(next)).1;
-                    let next_length2 = matches.get(data, i + 1, hash2(next)).1;
-                    let next_length = next_length1.max(next_length2);
-
-                    if length >= next_length && next != 0 {
+                    if next != 0 && !long_matches.contains(hash2(next)) {
                         let dist = (i - prev_i as usize) as u16;
-                        let mut dist_sym = 29;
-                        while dist_sym > 0 && dist < DIST_SYM_TO_DIST_BASE[dist_sym as usize - 1] {
-                            dist_sym -= 1;
-                        }
+                        let dist_sym = distance_to_dist_sym(dist);
 
-                        if length <= 8 {
-                            let sym = LENGTH_TO_SYMBOL[length as usize - 3] as usize;
-                            let len_bits = lengths[sym];
-                            let len_extra = LENGTH_TO_LEN_EXTRA[length as usize - 3];
-                            let dist_bits = dist_lengths[dist_sym as usize];
-                            let dist_extra = DIST_SYM_TO_DIST_EXTRA[dist_sym as usize];
-                            let backref_cost =
-                                (len_bits + len_extra + dist_bits + dist_extra) as u32;
+                        let sym = LENGTH_TO_SYMBOL[length as usize - 3] as usize;
+                        let len_bits = lengths[sym];
+                        let len_extra = LENGTH_TO_LEN_EXTRA[length as usize - 3];
+                        let dist_bits = dist_lengths[dist_sym as usize];
+                        let dist_extra = DIST_SYM_TO_DIST_EXTRA[dist_sym as usize];
+                        let backref_cost = (len_bits + len_extra + dist_bits + dist_extra) as u32;
 
-                            let mut literal_cost = 0;
-                            for j in i..i + length as usize {
-                                literal_cost += lengths[data[j] as usize] as u32;
-                                if literal_cost >= backref_cost {
-                                    break;
-                                }
-                            }
-                            if literal_cost <= backref_cost {
-                                symbols.push(Symbol::Literal(data[i]));
-                                i += 1;
-                                continue;
+                        let mut literal_cost = 0;
+                        for j in i..i + length as usize {
+                            literal_cost += lengths[data[j] as usize] as u32;
+                            if literal_cost >= backref_cost {
+                                break;
                             }
                         }
+                        if literal_cost > backref_cost {
+                            symbols.push(Symbol::Backref {
+                                length: length as u16,
+                                distance: dist,
+                                dist_sym,
+                            });
 
-                        symbols.push(Symbol::Backref {
-                            length: length as u16,
-                            distance: dist,
-                            dist_sym,
-                        });
-                        i += length as usize;
-                        continue;
+                            for j in (i + 1).min(i + length as usize).saturating_sub(8)
+                                ..(i + length as usize).min(data.len() - 8)
+                            {
+                                let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                                short_matches.insert(hash(v), j as u32);
+                                long_matches.insert(hash2(v), j as u32);
+                            }
+
+                            i += length as usize;
+                            last_match = i;
+                            continue;
+                        }
                     }
+                }
+
+                for _ in 0..((i - last_match) >> 9).min((data.len() - i).saturating_sub(8)) {
+                    symbols.push(Symbol::Literal(data[i]));
+                    i += 1;
                 }
 
                 symbols.push(Symbol::Literal(data[i]));
                 i += 1;
             }
-            for i in i..data.len() {
+            for i in i..block_end {
                 symbols.push(Symbol::Literal(data[i]));
             }
+            i = block_end;
 
             let mut frequencies = [0u32; 286];
             let mut dist_frequencies = [0u32; 30];
+            // frequencies[256] = 1;
             for symbol in &symbols {
                 match symbol {
                     Symbol::Literal(lit) => frequencies[*lit as usize] += 1,
@@ -414,10 +461,6 @@ impl<W: Write> Compressor<W> {
 
             let mut dist_codes = [0u16; 30];
             build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
-
-            if n == 0 {
-                continue;
-            }
 
             let rle_three = lengths[257] + dist_lengths[0] > 3 * lengths[0];
             let rle_four = lengths[257] + dist_lengths[0] > 4 * lengths[0];
@@ -467,6 +510,7 @@ impl<W: Write> Compressor<W> {
                     }
                 }
             }
+            self.write_bits(codes[256] as u64, lengths[256])?;
         }
 
         Ok(())
