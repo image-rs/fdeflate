@@ -1,8 +1,9 @@
 use simd_adler32::Adler32;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::{collections::BinaryHeap, io::{self, Seek, SeekFrom, Write}};
 
 use crate::tables::{
-    BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
+    BITMASKS, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, HUFFMAN_CODES, HUFFMAN_LENGTHS,
+    LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
 };
 
 /// Compressor that produces fdeflate compressed streams.
@@ -90,76 +91,138 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
+    fn match_length(data: &[u8], a: usize, b: usize) -> usize {
+        if b - a > 32768 {
+            return 0;
+        }
+
+        let mut length = 0;
+        while length < 258 && b + length < data.len() && data[a + length] == data[b + length] {
+            length += 1;
+        }
+        length
+    }
+
     /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
         self.checksum.write(data);
 
-        let mut run = 0;
-        let mut chunks = data.chunks_exact(8);
-        for chunk in &mut chunks {
-            let ichunk = u64::from_le_bytes(chunk.try_into().unwrap());
+        const TABLE_SIZE: usize = 32768;
+        let mut matches = vec![[0; 2]; TABLE_SIZE];
 
-            if ichunk == 0 {
-                run += 8;
-                continue;
-            } else if run > 0 {
-                let run_extra = ichunk.trailing_zeros() / 8;
-                self.write_run(run + run_extra)?;
-                run = 0;
+        let mut i = 0;
+        while i + 8 < data.len() {
 
-                if run_extra > 0 {
-                    run = ichunk.leading_zeros() / 8;
-                    for &b in &chunk[run_extra as usize..8 - run as usize] {
-                        self.write_bits(
-                            HUFFMAN_CODES[b as usize] as u64,
-                            HUFFMAN_LENGTHS[b as usize],
-                        )?;
-                    }
+            if data[i] == 0 {
+                let mut run_length = 1;
+                while run_length < 258 && i + run_length < data.len() && data[i + run_length] == 0 {
+                    run_length += 1;
+                }
+                if run_length >= 4 {
+                    innumerable::event!("run", run_length.min(10) as u64);
+                    self.write_run(run_length as u32)?;
+                    i += run_length;
                     continue;
                 }
             }
 
-            let run_start = ichunk.leading_zeros() / 8;
-            if run_start > 0 {
-                for &b in &chunk[..8 - run_start as usize] {
-                    self.write_bits(
-                        HUFFMAN_CODES[b as usize] as u64,
-                        HUFFMAN_LENGTHS[b as usize],
-                    )?;
-                }
-                run = run_start;
-                continue;
+            let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
+            let current_hash = (0x27220a95u64.wrapping_mul(current & 0xffffffff)) as usize % TABLE_SIZE;
+            let current_hash2 = (0x330698ec124c97f2u64.wrapping_mul(current)) as usize % TABLE_SIZE;
+
+            let [a, b] = matches[current_hash];
+            let a_len = Self::match_length(data, a, i);
+            let b_len = Self::match_length(data, b, i);
+
+            let [a2, b2] = matches[current_hash2];
+            let a_len2 = Self::match_length(data, a2, i);
+            let b_len2 = Self::match_length(data, b2, i);
+
+            if a < b {
+                matches[current_hash] = [i, b];
+            } else {
+                matches[current_hash] = [a, i];
+            }
+            if a2 < b2 {
+                matches[current_hash2] = [i, b2];
+            } else {
+                matches[current_hash2] = [a2, i];
             }
 
-            let n0 = HUFFMAN_LENGTHS[chunk[0] as usize];
-            let n1 = HUFFMAN_LENGTHS[chunk[1] as usize];
-            let n2 = HUFFMAN_LENGTHS[chunk[2] as usize];
-            let n3 = HUFFMAN_LENGTHS[chunk[3] as usize];
-            let bits = HUFFMAN_CODES[chunk[0] as usize] as u64
-                | ((HUFFMAN_CODES[chunk[1] as usize] as u64) << n0)
-                | ((HUFFMAN_CODES[chunk[2] as usize] as u64) << (n0 + n1))
-                | ((HUFFMAN_CODES[chunk[3] as usize] as u64) << (n0 + n1 + n2));
-            self.write_bits(bits, n0 + n1 + n2 + n3)?;
+            let (mut length, mut prev_i) = (a_len, a);
+            if b_len > length || b_len == length && b > prev_i {
+                length = b_len;
+                prev_i = b;
+            }
+            if a_len2 > length || a_len2 == length && a2 > prev_i {
+                length = a_len2;
+                prev_i = a2;
+            }
+            if b_len2 > length || b_len2 == length && b2 > prev_i {
+                length = b_len2;
+                prev_i = b2;
+            }
 
-            let n4 = HUFFMAN_LENGTHS[chunk[4] as usize];
-            let n5 = HUFFMAN_LENGTHS[chunk[5] as usize];
-            let n6 = HUFFMAN_LENGTHS[chunk[6] as usize];
-            let n7 = HUFFMAN_LENGTHS[chunk[7] as usize];
-            let bits2 = HUFFMAN_CODES[chunk[4] as usize] as u64
-                | ((HUFFMAN_CODES[chunk[5] as usize] as u64) << n4)
-                | ((HUFFMAN_CODES[chunk[6] as usize] as u64) << (n4 + n5))
-                | ((HUFFMAN_CODES[chunk[7] as usize] as u64) << (n4 + n5 + n6));
-            self.write_bits(bits2, n4 + n5 + n6 + n7)?;
-        }
+            if length >= 3 {
+                let next = u64::from_le_bytes(data[i + 1..][..8].try_into().unwrap());
+                let next_hash = (0x27220a95u64.wrapping_mul(next & 0xffffffff)) as usize % TABLE_SIZE;
+                let next_hash2 = (0x330698ec124c97f2u64.wrapping_mul(next)) as usize % TABLE_SIZE;
 
-        if run > 0 {
-            self.write_run(run)?;
-        }
+                let [next_a, next_b] = matches[next_hash];
+                let next_a_len = Self::match_length(data, next_a, i + 1);
+                let next_b_len = Self::match_length(data, next_b, i + 1);
 
-        for &b in chunks.remainder() {
+                let [next_a2, next_b2] = matches[next_hash2];
+                let next_a_len2 = Self::match_length(data, next_a2, i + 1);
+                let next_b_len2 = Self::match_length(data, next_b2, i + 1);
+                let next_length = next_a_len.max(next_b_len).max(next_a_len2).max(next_b_len2);
+
+                if length >= next_length && next != 0 {
+                    let sym = LENGTH_TO_SYMBOL[length - 3] as usize;
+                    let len_bits = HUFFMAN_LENGTHS[sym];
+                    let len_extra = LENGTH_TO_LEN_EXTRA[length - 3];
+
+                    let dist = (i - prev_i) as u16;
+                    let mut dist_sym = 29;
+                    while dist_sym > 0 && dist < DIST_SYM_TO_DIST_BASE[dist_sym as usize - 1] {
+                        dist_sym -= 1;
+                    }
+                    let dist_bits = 6;
+                    let dist_extra = DIST_SYM_TO_DIST_EXTRA[dist_sym as usize];
+
+                    let backref_cost =
+                        len_bits as u32 + len_extra as u32 + dist_bits as u32 + dist_extra as u32;
+                    assert!(backref_cost < 256);
+                    let backref_cost = backref_cost as u8;
+
+                    let mut literal_cost = 0;
+                    for j in i..i + length {
+                        literal_cost += HUFFMAN_LENGTHS[data[j] as usize] as u32;
+                    }
+
+                    if (backref_cost as u32) < literal_cost {
+                        innumerable::event!("backref", length.min(10) as u64);
+
+                        self.write_bits(0, backref_cost)?;
+                        i += length;
+                        continue;
+                    }
+                }
+            }
+
+            innumerable::event!("literal");
             self.write_bits(
-                HUFFMAN_CODES[b as usize] as u64,
-                HUFFMAN_LENGTHS[b as usize],
+                HUFFMAN_CODES[data[i] as usize] as u64,
+                HUFFMAN_LENGTHS[data[i] as usize],
+            )?;
+            i += 1;
+        }
+
+        for i in i..data.len() {
+            innumerable::event!("literal");
+            self.write_bits(
+                HUFFMAN_CODES[data[i] as usize] as u64,
+                HUFFMAN_LENGTHS[data[i] as usize],
             )?;
         }
 
