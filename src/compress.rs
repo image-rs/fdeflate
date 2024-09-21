@@ -151,7 +151,7 @@ fn hash2(v: u64) -> u32 {
 }
 
 const WAYS: usize = 1;
-const CACHE_SIZE: usize = 1 << 16;
+const CACHE_SIZE: usize = 1 << 19;
 
 #[derive(Debug, Copy, Clone)]
 struct Entry {
@@ -315,30 +315,31 @@ impl<W: Write> Compressor<W> {
 
         let mut short_matches = CacheTable::new();
         let mut long_matches = CacheTable::new();
-        let mut last_match = 0;
         let mut i = 0;
+
+        let mut lengths = HUFFMAN_LENGTHS;
+        let mut dist_lengths = [6u8; 30];
+        dist_lengths[0] = 1;
 
         while i < data.len() {
             let mut symbols = Vec::new();
 
-            let block_end = data.len().min(i + 64 * 1024 * 1024);
+            let block_end = data.len().min(i + 128 * 1024);
 
-            let mut lengths = HUFFMAN_LENGTHS;
-            let mut dist_lengths = [6u8; 30];
-            dist_lengths[0] = 1;
+            for len in &mut lengths {
+                if *len == 0 { *len = 15; }
+            }
+            for len in &mut dist_lengths {
+                if *len == 0 { *len = 6; }
+            }
 
-            // for len in lengths.iter_mut().chain(dist_lengths.iter_mut()) {
-            //     if *len == 0 {
-            //         *len = 15;
-            //     }
-            // }
-
+            let mut last_match = i;
             while i < block_end && i + 8 < data.len() {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
 
                 if current & 0xffff_ffff == 0 {
                     let mut run_length = 4;
-                    while run_length < 258
+                    while run_length <= 258
                         && i + run_length < data.len()
                         && data[i + run_length] == 0
                     {
@@ -433,11 +434,11 @@ impl<W: Write> Compressor<W> {
             for i in i..block_end {
                 symbols.push(Symbol::Literal(data[i]));
             }
-            i = block_end;
+            i = i.max(block_end);
 
             let mut frequencies = [0u32; 286];
             let mut dist_frequencies = [0u32; 30];
-            // frequencies[256] = 1;
+            frequencies[256] = 1;
             for symbol in &symbols {
                 match symbol {
                     Symbol::Literal(lit) => frequencies[*lit as usize] += 1,
