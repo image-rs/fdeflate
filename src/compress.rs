@@ -1,10 +1,219 @@
 use simd_adler32::Adler32;
-use std::{collections::BinaryHeap, io::{self, Seek, SeekFrom, Write}};
+use std::{
+    collections::BinaryHeap,
+    io::{self, Seek, SeekFrom, Write},
+};
 
 use crate::tables::{
     BITMASKS, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, HUFFMAN_CODES, HUFFMAN_LENGTHS,
     LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
 };
+
+fn build_huffman_tree(
+    frequencies: &[u32],
+    lengths: &mut [u8],
+    codes: &mut [u16],
+    length_limit: u8,
+) -> bool {
+    assert_eq!(frequencies.len(), lengths.len());
+    assert_eq!(frequencies.len(), codes.len());
+
+    if frequencies.iter().filter(|&&f| f > 0).count() <= 1 {
+        lengths.fill(0);
+        codes.fill(0);
+        return false;
+    }
+
+    #[derive(Eq, PartialEq, Copy, Clone, Debug)]
+    struct Item(u32, u16);
+    impl Ord for Item {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            other.0.cmp(&self.0)
+        }
+    }
+    impl PartialOrd for Item {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    // Build a huffman tree
+    let mut internal_nodes = Vec::new();
+    let mut nodes = BinaryHeap::from_iter(
+        frequencies
+            .iter()
+            .enumerate()
+            .filter(|(_, &frequency)| frequency > 0)
+            .map(|(i, &frequency)| Item(frequency, i as u16)),
+    );
+    while nodes.len() > 1 {
+        let Item(frequency1, index1) = nodes.pop().unwrap();
+        let mut root = nodes.peek_mut().unwrap();
+        internal_nodes.push((index1, root.1));
+        *root = Item(
+            frequency1 + root.0,
+            internal_nodes.len() as u16 + frequencies.len() as u16 - 1,
+        );
+    }
+
+    // Walk the tree to assign code lengths
+    lengths.fill(0);
+    let mut stack = Vec::new();
+    stack.push((nodes.pop().unwrap().1, 0));
+    while let Some((node, depth)) = stack.pop() {
+        let node = node as usize;
+        if node < frequencies.len() {
+            lengths[node] = depth as u8;
+        } else {
+            let (left, right) = internal_nodes[node - frequencies.len()];
+            stack.push((left, depth + 1));
+            stack.push((right, depth + 1));
+        }
+    }
+
+    // Limit the codes to length length_limit
+    let mut max_length = 0;
+    for &length in lengths.iter() {
+        max_length = max_length.max(length);
+    }
+    if max_length > length_limit {
+        let mut counts = [0u32; 16];
+        for &length in lengths.iter() {
+            counts[length.min(length_limit) as usize] += 1;
+        }
+
+        let mut total = 0;
+        for (i, count) in counts
+            .iter()
+            .enumerate()
+            .skip(1)
+            .take(length_limit as usize)
+        {
+            total += count << (length_limit as usize - i);
+        }
+
+        while total > 1u32 << length_limit {
+            let mut i = length_limit as usize - 1;
+            while counts[i] == 0 {
+                i -= 1;
+            }
+            counts[i] -= 1;
+            counts[length_limit as usize] -= 1;
+            counts[i + 1] += 2;
+            total -= 1;
+        }
+
+        // assign new lengths
+        let mut len = length_limit;
+        let mut indexes = frequencies.iter().copied().enumerate().collect::<Vec<_>>();
+        indexes.sort_unstable_by_key(|&(_, frequency)| frequency);
+        for &(i, frequency) in indexes.iter() {
+            if frequency > 0 {
+                while counts[len as usize] == 0 {
+                    len -= 1;
+                }
+                lengths[i] = len;
+                counts[len as usize] -= 1;
+            }
+        }
+    }
+
+    // Assign codes
+    codes.fill(0);
+    let mut code = 0u32;
+    for len in 1..=length_limit {
+        for (i, &length) in lengths.iter().enumerate() {
+            if length == len {
+                codes[i] = (code as u16).reverse_bits() >> (16 - len);
+                code += 1;
+            }
+        }
+        code <<= 1;
+    }
+    assert_eq!(code, 2 << length_limit);
+
+    true
+}
+
+const WAYS: usize = 16;
+const CACHE_SIZE: usize = 32768;
+
+#[derive(Debug, Copy, Clone)]
+struct Entry {
+    tags: [u32; WAYS],
+    offsets: [u32; WAYS],
+}
+
+struct CacheTable {
+    entries: Box<[Entry; CACHE_SIZE]>,
+}
+impl CacheTable {
+    fn new() -> Self {
+        let entries: Box<[Entry]> = vec![
+            Entry {
+                tags: [0; WAYS],
+                offsets: [0; WAYS],
+            };
+            CACHE_SIZE
+        ]
+        .into_boxed_slice();
+
+        Self {
+            entries: entries.try_into().unwrap(),
+        }
+    }
+
+    fn get(&self, data: &[u8], index: usize, hash: u32) -> (u32, u16) {
+        let mut best_offset = 0;
+        let mut best_length = 0;
+
+        let entry = &self.entries[(hash as usize) % CACHE_SIZE];
+        for i in 0..WAYS {
+            if entry.tags[i] != hash {
+                continue;
+            }
+
+            let offset = entry.offsets[i] as usize;
+            if index - offset < 32768 {
+                let mut length = 0;
+                while length < 258 && index + length < data.len() && data[index + length] == data[offset + length] {
+                    length += 1;
+                }
+
+                if length > 3 && length > best_length {
+                    best_offset = offset as u32;
+                    best_length = length;
+                }
+                if length == 258 {
+                    break;
+                }
+            }
+        }
+
+        (best_offset, best_length as u16)
+    }
+
+    fn insert(&mut self, hash: u32, offset: u32) {
+        let entry = &mut self.entries[(hash as usize) % CACHE_SIZE];
+
+        let mut oldest = 0;
+        for i in 1..WAYS {
+            if entry.offsets[i] < entry.offsets[oldest] {
+                oldest = i;
+            }
+        }
+
+        entry.tags[oldest] = hash;
+        entry.offsets[oldest] = offset;
+    }
+}
+
+fn hash(v: u64) -> u32 {
+    0x27220a95u64.wrapping_mul((v & 0xffffff) ^ 0x330698ec) as u32
+}
+fn hash2(v: u64) -> u32 {
+    0x330698ecu64.wrapping_mul((v & 0xffffffffffff) ^ 0x27220a95) as u32
+}
 
 /// Compressor that produces fdeflate compressed streams.
 pub struct Compressor<W: Write> {
@@ -43,30 +252,6 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
-    fn write_run(&mut self, mut run: u32) -> io::Result<()> {
-        self.write_bits(HUFFMAN_CODES[0] as u64, HUFFMAN_LENGTHS[0])?;
-        run -= 1;
-
-        while run >= 258 {
-            self.write_bits(HUFFMAN_CODES[285] as u64, HUFFMAN_LENGTHS[285] + 1)?;
-            run -= 258;
-        }
-
-        if run > 4 {
-            let sym = LENGTH_TO_SYMBOL[run as usize - 3] as usize;
-            self.write_bits(HUFFMAN_CODES[sym] as u64, HUFFMAN_LENGTHS[sym])?;
-
-            let len_extra = LENGTH_TO_LEN_EXTRA[run as usize - 3];
-            let extra = ((run - 3) & BITMASKS[len_extra as usize]) as u64;
-            self.write_bits(extra, len_extra + 1)?;
-        } else {
-            debug_assert_eq!(HUFFMAN_CODES[0], 0);
-            self.write_bits(0, run as u8 * HUFFMAN_LENGTHS[0])?;
-        }
-
-        Ok(())
-    }
-
     /// Create a new Compressor.
     pub fn new(writer: W) -> io::Result<Self> {
         let mut compressor = Self {
@@ -91,98 +276,62 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
-    fn match_length(data: &[u8], a: usize, b: usize) -> usize {
-        if b - a > 32768 {
-            return 0;
-        }
-
-        let mut length = 0;
-        while length < 258 && b + length < data.len() && data[a + length] == data[b + length] {
-            length += 1;
-        }
-        length
-    }
-
     /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
         self.checksum.write(data);
 
-        const TABLE_SIZE: usize = 32768;
-        let mut matches = vec![[0; 2]; TABLE_SIZE];
+        let mut matches = CacheTable::new();
+
+        enum Symbol {
+            Literal(u8),
+            Rle { length: u16 },
+            Backref { length: u16, distance: u16, dist_sym: u8 },
+        }
+        let mut symbols = Vec::new();
 
         let mut i = 0;
         while i + 8 < data.len() {
-
             if data[i] == 0 {
                 let mut run_length = 1;
                 while run_length < 258 && i + run_length < data.len() && data[i + run_length] == 0 {
                     run_length += 1;
                 }
-                if run_length >= 4 {
-                    innumerable::event!("run", run_length.min(10) as u64);
-                    self.write_run(run_length as u32)?;
+                if run_length >= 5 {
+                    symbols.push(Symbol::Literal(0));
+                    symbols.push(Symbol::Rle {
+                        length: run_length as u16,
+                    });
                     i += run_length;
                     continue;
                 }
             }
 
             let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-            let current_hash = (0x27220a95u64.wrapping_mul(current & 0xffffffff)) as usize % TABLE_SIZE;
-            let current_hash2 = (0x330698ec124c97f2u64.wrapping_mul(current)) as usize % TABLE_SIZE;
+            let current_hash = hash(current);
+            // let current_hash2 = hash2(current);
+            let (prev_i, length) = matches.get(data, i, current_hash as u32);
+            // let (prev_i2, length2) = matches.get(data, i, current_hash2 as u32);
+            matches.insert(current_hash as u32, i as u32);
+            // matches.insert(current_hash2 as u32, i as u32);
 
-            let [a, b] = matches[current_hash];
-            let a_len = Self::match_length(data, a, i);
-            let b_len = Self::match_length(data, b, i);
-
-            let [a2, b2] = matches[current_hash2];
-            let a_len2 = Self::match_length(data, a2, i);
-            let b_len2 = Self::match_length(data, b2, i);
-
-            if a < b {
-                matches[current_hash] = [i, b];
-            } else {
-                matches[current_hash] = [a, i];
-            }
-            if a2 < b2 {
-                matches[current_hash2] = [i, b2];
-            } else {
-                matches[current_hash2] = [a2, i];
-            }
-
-            let (mut length, mut prev_i) = (a_len, a);
-            if b_len > length || b_len == length && b > prev_i {
-                length = b_len;
-                prev_i = b;
-            }
-            if a_len2 > length || a_len2 == length && a2 > prev_i {
-                length = a_len2;
-                prev_i = a2;
-            }
-            if b_len2 > length || b_len2 == length && b2 > prev_i {
-                length = b_len2;
-                prev_i = b2;
-            }
+            // let (prev_i, length) = if length2 > length {
+            //     (prev_i2, length2)
+            // } else {
+            //     (prev_i, length)
+            // };
 
             if length >= 3 {
                 let next = u64::from_le_bytes(data[i + 1..][..8].try_into().unwrap());
-                let next_hash = (0x27220a95u64.wrapping_mul(next & 0xffffffff)) as usize % TABLE_SIZE;
-                let next_hash2 = (0x330698ec124c97f2u64.wrapping_mul(next)) as usize % TABLE_SIZE;
-
-                let [next_a, next_b] = matches[next_hash];
-                let next_a_len = Self::match_length(data, next_a, i + 1);
-                let next_b_len = Self::match_length(data, next_b, i + 1);
-
-                let [next_a2, next_b2] = matches[next_hash2];
-                let next_a_len2 = Self::match_length(data, next_a2, i + 1);
-                let next_b_len2 = Self::match_length(data, next_b2, i + 1);
-                let next_length = next_a_len.max(next_b_len).max(next_a_len2).max(next_b_len2);
+                let next_length1 = matches.get(data, i + 1, hash(next)).1;
+                let next_length2 = 0;//matches.get(data, i + 1, hash2(next)).1;
+                let next_length = next_length1.max(next_length2);
 
                 if length >= next_length && next != 0 {
-                    let sym = LENGTH_TO_SYMBOL[length - 3] as usize;
+                    let sym = LENGTH_TO_SYMBOL[length as usize - 3] as usize;
                     let len_bits = HUFFMAN_LENGTHS[sym];
-                    let len_extra = LENGTH_TO_LEN_EXTRA[length - 3];
+                    let len_extra = LENGTH_TO_LEN_EXTRA[length as usize - 3];
 
-                    let dist = (i - prev_i) as u16;
+                    let dist = (i - prev_i as usize) as u16;
                     let mut dist_sym = 29;
                     while dist_sym > 0 && dist < DIST_SYM_TO_DIST_BASE[dist_sym as usize - 1] {
                         dist_sym -= 1;
@@ -196,34 +345,82 @@ impl<W: Write> Compressor<W> {
                     let backref_cost = backref_cost as u8;
 
                     let mut literal_cost = 0;
-                    for j in i..i + length {
+                    for j in i..i + length as usize{
                         literal_cost += HUFFMAN_LENGTHS[data[j] as usize] as u32;
                     }
 
                     if (backref_cost as u32) < literal_cost {
-                        innumerable::event!("backref", length.min(10) as u64);
-
-                        self.write_bits(0, backref_cost)?;
-                        i += length;
+                        symbols.push(Symbol::Backref {
+                            length: length as u16,
+                            distance: dist,
+                            dist_sym,
+                        });
+                        i += length as usize;
                         continue;
                     }
                 }
             }
 
-            innumerable::event!("literal");
-            self.write_bits(
-                HUFFMAN_CODES[data[i] as usize] as u64,
-                HUFFMAN_LENGTHS[data[i] as usize],
-            )?;
+            symbols.push(Symbol::Literal(data[i]));
             i += 1;
         }
-
         for i in i..data.len() {
-            innumerable::event!("literal");
-            self.write_bits(
-                HUFFMAN_CODES[data[i] as usize] as u64,
-                HUFFMAN_LENGTHS[data[i] as usize],
-            )?;
+            symbols.push(Symbol::Literal(data[i]));
+        }
+
+        let mut frequencies = [0u32; 286];
+        let mut dist_frequencies = [0u32; 30];
+        for symbol in &symbols {
+            match symbol {
+                Symbol::Literal(lit) => frequencies[*lit as usize] += 1,
+                Symbol::Rle { length } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    frequencies[sym] += 1;
+                    dist_frequencies[0] += 1;
+                }
+                Symbol::Backref { length, dist_sym, .. } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    frequencies[sym] += 1;
+                    dist_frequencies[*dist_sym as usize] += 1;
+                }
+            }
+        }
+
+        let mut lengths = [0u8; 286];
+        let mut codes = [0u16; 286];
+        build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
+
+        let mut dist_lengths = [0u8; 30];
+        let mut dist_codes = [0u16; 30];
+        build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
+
+        for symbol in &symbols {
+            match symbol {
+                Symbol::Literal(lit) => {
+                    let sym = *lit as usize;
+                    self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                }
+                Symbol::Rle { length } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                    let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
+                    let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
+                    self.write_bits(extra, len_extra + 1)?;
+                    self.write_bits(dist_codes[0] as u64, dist_lengths[0])?;
+                }
+                Symbol::Backref { length, distance, dist_sym } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                    let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
+                    let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
+                    self.write_bits(extra, len_extra)?;
+
+                    self.write_bits(dist_codes[*dist_sym as usize] as u64, dist_lengths[*dist_sym as usize])?;
+                    let dist_extra = DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize];
+                    let extra = ((*distance as u32) & BITMASKS[dist_extra as usize]) as u64;
+                    self.write_bits(extra, dist_extra)?;
+                }
+            }
         }
 
         Ok(())
