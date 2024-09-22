@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::tables::{
-    BITMASKS, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, HUFFMAN_CODES, HUFFMAN_LENGTHS,
-    LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
+    BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA,
+    HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
 };
 
 fn build_huffman_tree(
@@ -21,6 +21,9 @@ fn build_huffman_tree(
     if frequencies.iter().filter(|&&f| f > 0).count() <= 1 {
         lengths.fill(0);
         codes.fill(0);
+        if let Some(i) = frequencies.iter().position(|&f| f > 0) {
+            lengths[i] = 1;
+        }
         return false;
     }
 
@@ -136,8 +139,13 @@ fn build_huffman_tree(
 }
 
 fn distance_to_dist_sym(distance: u16) -> u8 {
+    const LOOKUP: [u8; 16] = [0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7];
+    if distance <= 16 {
+        return LOOKUP[distance as usize - 1];
+    }
+
     let mut dist_sym = 29;
-    while dist_sym > 0 && distance < DIST_SYM_TO_DIST_BASE[dist_sym as usize - 1] {
+    while dist_sym > 0 && distance < DIST_SYM_TO_DIST_BASE[dist_sym as usize] {
         dist_sym -= 1;
     }
     dist_sym
@@ -242,6 +250,7 @@ pub struct Compressor<W: Write> {
     buffer: u64,
     nbits: u8,
     writer: W,
+    pending: Vec<u8>,
 }
 impl<W: Write> Compressor<W> {
     fn write_bits(&mut self, bits: u64, nbits: u8) -> io::Result<()> {
@@ -280,6 +289,7 @@ impl<W: Write> Compressor<W> {
             buffer: 0,
             nbits: 0,
             writer,
+            pending: Vec::new(),
         };
         compressor.write_headers()?;
         Ok(compressor)
@@ -291,8 +301,8 @@ impl<W: Write> Compressor<W> {
             114, 75, 99, 174, 109, 219, 182, 109, 219, 182, 109, 219, 182, 109, 105, 140, 158, 150,
             74, 175, 158, 50, 51, 34, 238, 249, 118, 183, 106, 122, 166, 135, 59, 107, 213, 15,
         ];
-        self.writer.write_all(&HEADER[..53]).unwrap();
-        self.write_bits(HEADER[53] as u64, 5)?;
+        self.writer.write_all(&HEADER[..2]).unwrap();
+        //self.write_bits(HEADER[53] as u64, 5)?;
 
         Ok(())
     }
@@ -300,12 +310,16 @@ impl<W: Write> Compressor<W> {
     /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
         self.checksum.write(data);
+        self.pending.extend_from_slice(data);
+        Ok(())
+    }
+
+    /// Write the remainder of the stream and return the inner writer.
+    pub fn finish(mut self) -> io::Result<W> {
+        let data = std::mem::take(&mut self.pending);
 
         enum Symbol {
             Literal(u8),
-            Rle {
-                length: u16,
-            },
             Backref {
                 length: u16,
                 distance: u16,
@@ -318,8 +332,8 @@ impl<W: Write> Compressor<W> {
         let mut i = 0;
 
         let mut lengths = HUFFMAN_LENGTHS;
-        let mut dist_lengths = [6u8; 30];
-        dist_lengths[0] = 1;
+        let mut dist_lengths = [5u8; 30];
+        //dist_lengths[0] = 1;
 
         while i < data.len() {
             let mut symbols = Vec::new();
@@ -327,37 +341,25 @@ impl<W: Write> Compressor<W> {
             let block_end = data.len().min(i + 128 * 1024);
 
             for len in &mut lengths {
-                if *len == 0 { *len = 15; }
+                if *len == 0 {
+                    *len = 15;
+                }
             }
             for len in &mut dist_lengths {
-                if *len == 0 { *len = 6; }
+                if *len == 0 {
+                    *len = 5;
+                }
             }
 
             let mut last_match = i;
-            while i < block_end && i + 8 < data.len() {
+            while i < block_end && i + 8 <= data.len() {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-
-                if current & 0xffff_ffff == 0 {
-                    let mut run_length = 4;
-                    while run_length <= 258
-                        && i + run_length < data.len()
-                        && data[i + run_length] == 0
-                    {
-                        run_length += 1;
-                    }
-                    symbols.push(Symbol::Literal(0));
-                    symbols.push(Symbol::Rle {
-                        length: (run_length - 1) as u16,
-                    });
-                    i += run_length;
-                    continue;
-                }
 
                 // Long hash
                 let long_hash = hash2(current);
-                let (prev_i, length) = long_matches.get(data, i, long_hash as u32);
+                let (prev_i, length) = long_matches.get(&data, i, long_hash as u32);
                 if length >= 8 {
-                    for j in (i + length as usize - 8)..(i + length as usize).min(data.len() - 8) {
+                    for j in i..(i + length as usize).min(data.len() - 8) {
                         let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
                         short_matches.insert(hash(v), j as u32);
                         long_matches.insert(hash2(v), j as u32);
@@ -378,48 +380,43 @@ impl<W: Write> Compressor<W> {
 
                 // Short hash
                 let short_hash = hash(current);
-                let (prev_i, length) = short_matches.get(data, i, short_hash as u32);
+                let (prev_i, length) = short_matches.get(&data, i, short_hash as u32);
                 short_matches.insert(short_hash as u32, i as u32);
                 long_matches.insert(long_hash as u32, i as u32);
                 if length >= 3 {
-                    let next = u64::from_le_bytes(data[i + 1..][..8].try_into().unwrap());
-                    if next != 0 && !long_matches.contains(hash2(next)) {
-                        let dist = (i - prev_i as usize) as u16;
-                        let dist_sym = distance_to_dist_sym(dist);
+                    let dist = (i - prev_i as usize) as u16;
+                    let dist_sym = distance_to_dist_sym(dist);
 
-                        let sym = LENGTH_TO_SYMBOL[length as usize - 3] as usize;
-                        let len_bits = lengths[sym];
-                        let len_extra = LENGTH_TO_LEN_EXTRA[length as usize - 3];
-                        let dist_bits = dist_lengths[dist_sym as usize];
-                        let dist_extra = DIST_SYM_TO_DIST_EXTRA[dist_sym as usize];
-                        let backref_cost = (len_bits + len_extra + dist_bits + dist_extra) as u32;
+                    let sym = LENGTH_TO_SYMBOL[length as usize - 3] as usize;
+                    let len_bits = lengths[sym];
+                    let len_extra = LENGTH_TO_LEN_EXTRA[length as usize - 3];
+                    let dist_bits = dist_lengths[dist_sym as usize];
+                    let dist_extra = DIST_SYM_TO_DIST_EXTRA[dist_sym as usize];
+                    let backref_cost = (len_bits + len_extra + dist_bits + dist_extra) as u32;
 
-                        let mut literal_cost = 0;
-                        for j in i..i + length as usize {
-                            literal_cost += lengths[data[j] as usize] as u32;
-                            if literal_cost >= backref_cost {
-                                break;
-                            }
+                    let mut literal_cost = 0;
+                    for j in i..i + length as usize {
+                        literal_cost += lengths[data[j] as usize] as u32;
+                        if literal_cost >= backref_cost {
+                            break;
                         }
-                        if literal_cost > backref_cost {
-                            symbols.push(Symbol::Backref {
-                                length: length as u16,
-                                distance: dist,
-                                dist_sym,
-                            });
+                    }
+                    if literal_cost > backref_cost {
+                        symbols.push(Symbol::Backref {
+                            length: length as u16,
+                            distance: dist,
+                            dist_sym,
+                        });
 
-                            for j in (i + 1).min(i + length as usize).saturating_sub(8)
-                                ..(i + length as usize).min(data.len() - 8)
-                            {
-                                let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                                short_matches.insert(hash(v), j as u32);
-                                long_matches.insert(hash2(v), j as u32);
-                            }
-
-                            i += length as usize;
-                            last_match = i;
-                            continue;
+                        for j in (i + 1)..(i + length as usize).min(data.len() - 8) {
+                            let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                            short_matches.insert(hash(v), j as u32);
+                            long_matches.insert(hash2(v), j as u32);
                         }
+
+                        i += length as usize;
+                        last_match = i;
+                        continue;
                     }
                 }
 
@@ -442,11 +439,6 @@ impl<W: Write> Compressor<W> {
             for symbol in &symbols {
                 match symbol {
                     Symbol::Literal(lit) => frequencies[*lit as usize] += 1,
-                    Symbol::Rle { length } => {
-                        let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
-                        frequencies[sym] += 1;
-                        dist_frequencies[0] += 1;
-                    }
                     Symbol::Backref {
                         length, dist_sym, ..
                     } => {
@@ -463,32 +455,47 @@ impl<W: Write> Compressor<W> {
             let mut dist_codes = [0u16; 30];
             build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
 
-            let rle_three = lengths[257] + dist_lengths[0] > 3 * lengths[0];
-            let rle_four = lengths[257] + dist_lengths[0] > 4 * lengths[0];
+            if i == data.len() {
+                self.write_bits(101, 3)?; // final block
+            } else {
+                self.write_bits(100, 3)?; // non-final block
+            }
+            self.write_bits(29, 5)?; // hlit
+            self.write_bits(29, 5)?; // hdist
+            self.write_bits(15, 4)?; // hclen
+
+            let mut code_length_frequencies = [0u32; 19];
+            for &length in &lengths {
+                code_length_frequencies[length as usize] += 1;
+            }
+            for &length in &dist_lengths {
+                code_length_frequencies[length as usize] += 1;
+            }
+            let mut code_length_lengths = [0u8; 19];
+            let mut code_length_codes = [0u16; 19];
+            build_huffman_tree(
+                &code_length_frequencies,
+                &mut code_length_lengths,
+                &mut code_length_codes,
+                7,
+            );
+
+            for j in 0..19 {
+                self.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
+            }
+
+            for &length in lengths.iter().chain(&dist_lengths) {
+                self.write_bits(
+                    code_length_codes[length as usize] as u64,
+                    code_length_lengths[length as usize],
+                )?;
+            }
 
             for symbol in &symbols {
                 match symbol {
                     Symbol::Literal(lit) => {
                         let sym = *lit as usize;
                         self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
-                    }
-                    Symbol::Rle { length: 3 } if rle_three => {
-                        self.write_bits(codes[0] as u64, lengths[0] as u8)?;
-                        self.write_bits(codes[0] as u64, lengths[0] as u8)?;
-                        self.write_bits(codes[0] as u64, lengths[0] as u8)?;
-                    }
-                    Symbol::Rle { length: 4 } if rle_four => {
-                        self.write_bits(codes[0] as u64, lengths[0] as u8)?;
-                        self.write_bits(codes[0] as u64, lengths[0] as u8)?;
-                        self.write_bits(codes[0] as u64, lengths[0] as u8)?;
-                    }
-                    Symbol::Rle { length } => {
-                        let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
-                        self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
-                        let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
-                        let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
-                        self.write_bits(extra, len_extra + 1)?;
-                        self.write_bits(dist_codes[0] as u64, dist_lengths[0])?;
                     }
                     Symbol::Backref {
                         length,
@@ -506,21 +513,16 @@ impl<W: Write> Compressor<W> {
                             dist_lengths[*dist_sym as usize],
                         )?;
                         let dist_extra = DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize];
-                        let extra = ((*distance as u32) & BITMASKS[dist_extra as usize]) as u64;
-                        self.write_bits(extra, dist_extra)?;
+                        let extra = *distance - DIST_SYM_TO_DIST_BASE[*dist_sym as usize];
+
+                        self.write_bits(extra as u64, dist_extra)?;
                     }
                 }
             }
             self.write_bits(codes[256] as u64, lengths[256])?;
         }
 
-        Ok(())
-    }
-
-    /// Write the remainder of the stream and return the inner writer.
-    pub fn finish(mut self) -> io::Result<W> {
         // Write end of block
-        self.write_bits(HUFFMAN_CODES[256] as u64, HUFFMAN_LENGTHS[256])?;
         self.flush()?;
 
         // Write Adler32 checksum
@@ -620,12 +622,29 @@ pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use crate::decompress;
+
     use super::*;
     use rand::Rng;
 
+    #[test]
+    fn test_distance_to_dist_sym() {
+        assert_eq!(distance_to_dist_sym(1), 0);
+        assert_eq!(distance_to_dist_sym(2), 1);
+        assert_eq!(distance_to_dist_sym(3), 2);
+        assert_eq!(distance_to_dist_sym(4), 3);
+        assert_eq!(distance_to_dist_sym(5), 4);
+        assert_eq!(distance_to_dist_sym(7), 5);
+        assert_eq!(distance_to_dist_sym(9), 6);
+        assert_eq!(distance_to_dist_sym(13), 7);
+        assert_eq!(distance_to_dist_sym(18), 8);
+        assert_eq!(distance_to_dist_sym(257), 16);
+    }
+
     fn roundtrip(data: &[u8]) {
         let compressed = compress_to_vec(data);
-        let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).unwrap();
+        //let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).unwrap();
+        let decompressed = crate::decompress_to_vec(&compressed).unwrap();
         assert_eq!(&decompressed, data);
     }
 
