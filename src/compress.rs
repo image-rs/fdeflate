@@ -1,9 +1,248 @@
 use simd_adler32::Adler32;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::{
+    collections::BinaryHeap,
+    io::{self, Seek, SeekFrom, Write},
+};
 
 use crate::tables::{
-    BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
+    BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA,
+    HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
 };
+
+fn build_huffman_tree(
+    frequencies: &[u32],
+    lengths: &mut [u8],
+    codes: &mut [u16],
+    length_limit: u8,
+) -> bool {
+    assert_eq!(frequencies.len(), lengths.len());
+    assert_eq!(frequencies.len(), codes.len());
+
+    if frequencies.iter().filter(|&&f| f > 0).count() <= 1 {
+        lengths.fill(0);
+        codes.fill(0);
+        if let Some(i) = frequencies.iter().position(|&f| f > 0) {
+            lengths[i] = 1;
+        }
+        return false;
+    }
+
+    #[derive(Eq, PartialEq, Copy, Clone, Debug)]
+    struct Item(u32, u16);
+    impl Ord for Item {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            other.0.cmp(&self.0)
+        }
+    }
+    impl PartialOrd for Item {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    // Build a huffman tree
+    let mut internal_nodes = Vec::new();
+    let mut nodes = BinaryHeap::from_iter(
+        frequencies
+            .iter()
+            .enumerate()
+            .filter(|(_, &frequency)| frequency > 0)
+            .map(|(i, &frequency)| Item(frequency, i as u16)),
+    );
+    while nodes.len() > 1 {
+        let Item(frequency1, index1) = nodes.pop().unwrap();
+        let mut root = nodes.peek_mut().unwrap();
+        internal_nodes.push((index1, root.1));
+        *root = Item(
+            frequency1 + root.0,
+            internal_nodes.len() as u16 + frequencies.len() as u16 - 1,
+        );
+    }
+
+    // Walk the tree to assign code lengths
+    lengths.fill(0);
+    let mut stack = Vec::new();
+    stack.push((nodes.pop().unwrap().1, 0));
+    while let Some((node, depth)) = stack.pop() {
+        let node = node as usize;
+        if node < frequencies.len() {
+            lengths[node] = depth as u8;
+        } else {
+            let (left, right) = internal_nodes[node - frequencies.len()];
+            stack.push((left, depth + 1));
+            stack.push((right, depth + 1));
+        }
+    }
+
+    // Limit the codes to length length_limit
+    let mut max_length = 0;
+    for &length in lengths.iter() {
+        max_length = max_length.max(length);
+    }
+    if max_length > length_limit {
+        let mut counts = [0u32; 16];
+        for &length in lengths.iter() {
+            counts[length.min(length_limit) as usize] += 1;
+        }
+
+        let mut total = 0;
+        for (i, count) in counts
+            .iter()
+            .enumerate()
+            .skip(1)
+            .take(length_limit as usize)
+        {
+            total += count << (length_limit as usize - i);
+        }
+
+        while total > 1u32 << length_limit {
+            let mut i = length_limit as usize - 1;
+            while counts[i] == 0 {
+                i -= 1;
+            }
+            counts[i] -= 1;
+            counts[length_limit as usize] -= 1;
+            counts[i + 1] += 2;
+            total -= 1;
+        }
+
+        // assign new lengths
+        let mut len = length_limit;
+        let mut indexes = frequencies.iter().copied().enumerate().collect::<Vec<_>>();
+        indexes.sort_unstable_by_key(|&(_, frequency)| frequency);
+        for &(i, frequency) in indexes.iter() {
+            if frequency > 0 {
+                while counts[len as usize] == 0 {
+                    len -= 1;
+                }
+                lengths[i] = len;
+                counts[len as usize] -= 1;
+            }
+        }
+    }
+
+    // Assign codes
+    codes.fill(0);
+    let mut code = 0u32;
+    for len in 1..=length_limit {
+        for (i, &length) in lengths.iter().enumerate() {
+            if length == len {
+                codes[i] = (code as u16).reverse_bits() >> (16 - len);
+                code += 1;
+            }
+        }
+        code <<= 1;
+    }
+    assert_eq!(code, 2 << length_limit);
+
+    true
+}
+
+fn distance_to_dist_sym(distance: u16) -> u8 {
+    const LOOKUP: [u8; 16] = [0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7];
+    if distance <= 16 {
+        return LOOKUP[distance as usize - 1];
+    }
+
+    let mut dist_sym = 29;
+    while dist_sym > 0 && distance < DIST_SYM_TO_DIST_BASE[dist_sym as usize] {
+        dist_sym -= 1;
+    }
+    dist_sym
+}
+
+fn hash(v: u64) -> u32 {
+    (0x27220a95u64.wrapping_mul((v & 0xffff_ffff) ^ 0x56330698ec) >> 32) as u32
+}
+fn hash2(v: u64) -> u32 {
+    (0x330698ecu64.wrapping_mul(v ^ 0x27220a95) >> 32) as u32
+}
+
+const WAYS: usize = 1;
+const CACHE_SIZE: usize = 1 << 19;
+
+#[derive(Debug, Copy, Clone)]
+struct Entry {
+    tags: [u32; WAYS],
+    offsets: [u32; WAYS],
+}
+
+struct CacheTable {
+    entries: Box<[Entry; CACHE_SIZE]>,
+}
+impl CacheTable {
+    fn new() -> Self {
+        let entries: Box<[Entry]> = vec![
+            Entry {
+                tags: [0; WAYS],
+                offsets: [0; WAYS],
+            };
+            CACHE_SIZE
+        ]
+        .into_boxed_slice();
+
+        Self {
+            entries: entries.try_into().unwrap(),
+        }
+    }
+
+    fn get(&self, data: &[u8], index: usize, hash: u32) -> (u32, u16) {
+        let mut best_offset = 0;
+        let mut best_length = 0;
+
+        let entry = &self.entries[(hash as usize) % CACHE_SIZE];
+        for i in 0..WAYS {
+            if entry.tags[i] != hash {
+                continue;
+            }
+
+            let offset = entry.offsets[i] as usize;
+            if index - offset < 32768 {
+                let mut length = 0;
+                while length < 258
+                    && index + length < data.len()
+                    && data[index + length] == data[offset + length]
+                {
+                    length += 1;
+                }
+
+                if length > 3 && length > best_length {
+                    best_offset = offset as u32;
+                    best_length = length;
+                }
+                if length == 258 {
+                    break;
+                }
+            }
+        }
+
+        (best_offset, best_length as u16)
+    }
+
+    fn contains(&self, hash: u32) -> bool {
+        let entry = &self.entries[(hash as usize) % CACHE_SIZE];
+        for i in 0..WAYS {
+            if entry.tags[i] == hash {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn insert(&mut self, hash: u32, offset: u32) {
+        let entry = &mut self.entries[(hash as usize) % CACHE_SIZE];
+
+        let mut oldest = 0;
+        for i in 1..WAYS {
+            if entry.offsets[i] < entry.offsets[oldest] {
+                oldest = i;
+            }
+        }
+
+        entry.tags[oldest] = hash;
+        entry.offsets[oldest] = offset;
+    }
+}
 
 /// Compressor that produces fdeflate compressed streams.
 pub struct Compressor<W: Write> {
@@ -11,6 +250,7 @@ pub struct Compressor<W: Write> {
     buffer: u64,
     nbits: u8,
     writer: W,
+    pending: Vec<u8>,
 }
 impl<W: Write> Compressor<W> {
     fn write_bits(&mut self, bits: u64, nbits: u8) -> io::Result<()> {
@@ -42,30 +282,6 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
-    fn write_run(&mut self, mut run: u32) -> io::Result<()> {
-        self.write_bits(HUFFMAN_CODES[0] as u64, HUFFMAN_LENGTHS[0])?;
-        run -= 1;
-
-        while run >= 258 {
-            self.write_bits(HUFFMAN_CODES[285] as u64, HUFFMAN_LENGTHS[285] + 1)?;
-            run -= 258;
-        }
-
-        if run > 4 {
-            let sym = LENGTH_TO_SYMBOL[run as usize - 3] as usize;
-            self.write_bits(HUFFMAN_CODES[sym] as u64, HUFFMAN_LENGTHS[sym])?;
-
-            let len_extra = LENGTH_TO_LEN_EXTRA[run as usize - 3];
-            let extra = ((run - 3) & BITMASKS[len_extra as usize]) as u64;
-            self.write_bits(extra, len_extra + 1)?;
-        } else {
-            debug_assert_eq!(HUFFMAN_CODES[0], 0);
-            self.write_bits(0, run as u8 * HUFFMAN_LENGTHS[0])?;
-        }
-
-        Ok(())
-    }
-
     /// Create a new Compressor.
     pub fn new(writer: W) -> io::Result<Self> {
         let mut compressor = Self {
@@ -73,6 +289,7 @@ impl<W: Write> Compressor<W> {
             buffer: 0,
             nbits: 0,
             writer,
+            pending: Vec::new(),
         };
         compressor.write_headers()?;
         Ok(compressor)
@@ -84,8 +301,8 @@ impl<W: Write> Compressor<W> {
             114, 75, 99, 174, 109, 219, 182, 109, 219, 182, 109, 219, 182, 109, 105, 140, 158, 150,
             74, 175, 158, 50, 51, 34, 238, 249, 118, 183, 106, 122, 166, 135, 59, 107, 213, 15,
         ];
-        self.writer.write_all(&HEADER[..53]).unwrap();
-        self.write_bits(HEADER[53] as u64, 5)?;
+        self.writer.write_all(&HEADER[..2]).unwrap();
+        //self.write_bits(HEADER[53] as u64, 5)?;
 
         Ok(())
     }
@@ -93,83 +310,219 @@ impl<W: Write> Compressor<W> {
     /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
         self.checksum.write(data);
-
-        let mut run = 0;
-        let mut chunks = data.chunks_exact(8);
-        for chunk in &mut chunks {
-            let ichunk = u64::from_le_bytes(chunk.try_into().unwrap());
-
-            if ichunk == 0 {
-                run += 8;
-                continue;
-            } else if run > 0 {
-                let run_extra = ichunk.trailing_zeros() / 8;
-                self.write_run(run + run_extra)?;
-                run = 0;
-
-                if run_extra > 0 {
-                    run = ichunk.leading_zeros() / 8;
-                    for &b in &chunk[run_extra as usize..8 - run as usize] {
-                        self.write_bits(
-                            HUFFMAN_CODES[b as usize] as u64,
-                            HUFFMAN_LENGTHS[b as usize],
-                        )?;
-                    }
-                    continue;
-                }
-            }
-
-            let run_start = ichunk.leading_zeros() / 8;
-            if run_start > 0 {
-                for &b in &chunk[..8 - run_start as usize] {
-                    self.write_bits(
-                        HUFFMAN_CODES[b as usize] as u64,
-                        HUFFMAN_LENGTHS[b as usize],
-                    )?;
-                }
-                run = run_start;
-                continue;
-            }
-
-            let n0 = HUFFMAN_LENGTHS[chunk[0] as usize];
-            let n1 = HUFFMAN_LENGTHS[chunk[1] as usize];
-            let n2 = HUFFMAN_LENGTHS[chunk[2] as usize];
-            let n3 = HUFFMAN_LENGTHS[chunk[3] as usize];
-            let bits = HUFFMAN_CODES[chunk[0] as usize] as u64
-                | ((HUFFMAN_CODES[chunk[1] as usize] as u64) << n0)
-                | ((HUFFMAN_CODES[chunk[2] as usize] as u64) << (n0 + n1))
-                | ((HUFFMAN_CODES[chunk[3] as usize] as u64) << (n0 + n1 + n2));
-            self.write_bits(bits, n0 + n1 + n2 + n3)?;
-
-            let n4 = HUFFMAN_LENGTHS[chunk[4] as usize];
-            let n5 = HUFFMAN_LENGTHS[chunk[5] as usize];
-            let n6 = HUFFMAN_LENGTHS[chunk[6] as usize];
-            let n7 = HUFFMAN_LENGTHS[chunk[7] as usize];
-            let bits2 = HUFFMAN_CODES[chunk[4] as usize] as u64
-                | ((HUFFMAN_CODES[chunk[5] as usize] as u64) << n4)
-                | ((HUFFMAN_CODES[chunk[6] as usize] as u64) << (n4 + n5))
-                | ((HUFFMAN_CODES[chunk[7] as usize] as u64) << (n4 + n5 + n6));
-            self.write_bits(bits2, n4 + n5 + n6 + n7)?;
-        }
-
-        if run > 0 {
-            self.write_run(run)?;
-        }
-
-        for &b in chunks.remainder() {
-            self.write_bits(
-                HUFFMAN_CODES[b as usize] as u64,
-                HUFFMAN_LENGTHS[b as usize],
-            )?;
-        }
-
+        self.pending.extend_from_slice(data);
         Ok(())
     }
 
     /// Write the remainder of the stream and return the inner writer.
     pub fn finish(mut self) -> io::Result<W> {
+        let data = std::mem::take(&mut self.pending);
+
+        enum Symbol {
+            Literal(u8),
+            Backref {
+                length: u16,
+                distance: u16,
+                dist_sym: u8,
+            },
+        }
+
+        let mut short_matches = CacheTable::new();
+        let mut long_matches = CacheTable::new();
+        let mut i = 0;
+
+        let mut lengths = HUFFMAN_LENGTHS;
+        let mut dist_lengths = [5u8; 30];
+        //dist_lengths[0] = 1;
+
+        while i < data.len() {
+            let mut symbols = Vec::new();
+
+            let block_end = data.len().min(i + 128 * 1024);
+
+            for len in &mut lengths {
+                if *len == 0 {
+                    *len = 15;
+                }
+            }
+            for len in &mut dist_lengths {
+                if *len == 0 {
+                    *len = 5;
+                }
+            }
+
+            let mut last_match = i;
+            while i < block_end && i + 8 <= data.len() {
+                let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
+
+                // Long hash
+                let long_hash = hash2(current);
+                let (prev_i, length) = long_matches.get(&data, i, long_hash as u32);
+                if length >= 8 {
+                    for j in i..(i + length as usize).min(data.len() - 8) {
+                        let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                        short_matches.insert(hash(v), j as u32);
+                        long_matches.insert(hash2(v), j as u32);
+                    }
+
+                    let dist = (i - prev_i as usize) as u16;
+                    let dist_sym = distance_to_dist_sym(dist);
+
+                    symbols.push(Symbol::Backref {
+                        length: length as u16,
+                        distance: dist,
+                        dist_sym,
+                    });
+                    i += length as usize;
+                    last_match = i;
+                    continue;
+                }
+
+                // Short hash
+                let short_hash = hash(current);
+                let (prev_i, length) = short_matches.get(&data, i, short_hash as u32);
+                short_matches.insert(short_hash as u32, i as u32);
+                long_matches.insert(long_hash as u32, i as u32);
+                if length >= 3 {
+                    let dist = (i - prev_i as usize) as u16;
+                    let dist_sym = distance_to_dist_sym(dist);
+
+                    let sym = LENGTH_TO_SYMBOL[length as usize - 3] as usize;
+                    let len_bits = lengths[sym];
+                    let len_extra = LENGTH_TO_LEN_EXTRA[length as usize - 3];
+                    let dist_bits = dist_lengths[dist_sym as usize];
+                    let dist_extra = DIST_SYM_TO_DIST_EXTRA[dist_sym as usize];
+                    let backref_cost = (len_bits + len_extra + dist_bits + dist_extra) as u32;
+
+                    let mut literal_cost = 0;
+                    for j in i..i + length as usize {
+                        literal_cost += lengths[data[j] as usize] as u32;
+                        if literal_cost >= backref_cost {
+                            break;
+                        }
+                    }
+                    if literal_cost > backref_cost {
+                        symbols.push(Symbol::Backref {
+                            length: length as u16,
+                            distance: dist,
+                            dist_sym,
+                        });
+
+                        for j in (i + 1)..(i + length as usize).min(data.len() - 8) {
+                            let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                            short_matches.insert(hash(v), j as u32);
+                            long_matches.insert(hash2(v), j as u32);
+                        }
+
+                        i += length as usize;
+                        last_match = i;
+                        continue;
+                    }
+                }
+
+                for _ in 0..((i - last_match) >> 9).min((data.len() - i).saturating_sub(8)) {
+                    symbols.push(Symbol::Literal(data[i]));
+                    i += 1;
+                }
+
+                symbols.push(Symbol::Literal(data[i]));
+                i += 1;
+            }
+            for i in i..block_end {
+                symbols.push(Symbol::Literal(data[i]));
+            }
+            i = i.max(block_end);
+
+            let mut frequencies = [0u32; 286];
+            let mut dist_frequencies = [0u32; 30];
+            frequencies[256] = 1;
+            for symbol in &symbols {
+                match symbol {
+                    Symbol::Literal(lit) => frequencies[*lit as usize] += 1,
+                    Symbol::Backref {
+                        length, dist_sym, ..
+                    } => {
+                        let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                        frequencies[sym] += 1;
+                        dist_frequencies[*dist_sym as usize] += 1;
+                    }
+                }
+            }
+
+            let mut codes = [0u16; 286];
+            build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
+
+            let mut dist_codes = [0u16; 30];
+            build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
+
+            if i == data.len() {
+                self.write_bits(101, 3)?; // final block
+            } else {
+                self.write_bits(100, 3)?; // non-final block
+            }
+            self.write_bits(29, 5)?; // hlit
+            self.write_bits(29, 5)?; // hdist
+            self.write_bits(15, 4)?; // hclen
+
+            let mut code_length_frequencies = [0u32; 19];
+            for &length in &lengths {
+                code_length_frequencies[length as usize] += 1;
+            }
+            for &length in &dist_lengths {
+                code_length_frequencies[length as usize] += 1;
+            }
+            let mut code_length_lengths = [0u8; 19];
+            let mut code_length_codes = [0u16; 19];
+            build_huffman_tree(
+                &code_length_frequencies,
+                &mut code_length_lengths,
+                &mut code_length_codes,
+                7,
+            );
+
+            for j in 0..19 {
+                self.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
+            }
+
+            for &length in lengths.iter().chain(&dist_lengths) {
+                self.write_bits(
+                    code_length_codes[length as usize] as u64,
+                    code_length_lengths[length as usize],
+                )?;
+            }
+
+            for symbol in &symbols {
+                match symbol {
+                    Symbol::Literal(lit) => {
+                        let sym = *lit as usize;
+                        self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                    }
+                    Symbol::Backref {
+                        length,
+                        distance,
+                        dist_sym,
+                    } => {
+                        let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                        self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                        let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
+                        let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
+                        self.write_bits(extra, len_extra)?;
+
+                        self.write_bits(
+                            dist_codes[*dist_sym as usize] as u64,
+                            dist_lengths[*dist_sym as usize],
+                        )?;
+                        let dist_extra = DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize];
+                        let extra = *distance - DIST_SYM_TO_DIST_BASE[*dist_sym as usize];
+
+                        self.write_bits(extra as u64, dist_extra)?;
+                    }
+                }
+            }
+            self.write_bits(codes[256] as u64, lengths[256])?;
+        }
+
         // Write end of block
-        self.write_bits(HUFFMAN_CODES[256] as u64, HUFFMAN_LENGTHS[256])?;
         self.flush()?;
 
         // Write Adler32 checksum
@@ -269,12 +622,29 @@ pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use crate::decompress;
+
     use super::*;
     use rand::Rng;
 
+    #[test]
+    fn test_distance_to_dist_sym() {
+        assert_eq!(distance_to_dist_sym(1), 0);
+        assert_eq!(distance_to_dist_sym(2), 1);
+        assert_eq!(distance_to_dist_sym(3), 2);
+        assert_eq!(distance_to_dist_sym(4), 3);
+        assert_eq!(distance_to_dist_sym(5), 4);
+        assert_eq!(distance_to_dist_sym(7), 5);
+        assert_eq!(distance_to_dist_sym(9), 6);
+        assert_eq!(distance_to_dist_sym(13), 7);
+        assert_eq!(distance_to_dist_sym(18), 8);
+        assert_eq!(distance_to_dist_sym(257), 16);
+    }
+
     fn roundtrip(data: &[u8]) {
         let compressed = compress_to_vec(data);
-        let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).unwrap();
+        //let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).unwrap();
+        let decompressed = crate::decompress_to_vec(&compressed).unwrap();
         assert_eq!(&decompressed, data);
     }
 
