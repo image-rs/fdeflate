@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.5
+
+- Fix handling of invalid inputs, so that errors are consistently detected
+  regardless of how the input is "chunked" when feeding it into the
+  decompressor.
+- Add more fuzz testing.
+
 ## 0.3.4
 
 - Fix bug where `Decompressor::read` might fail to return an error for a
