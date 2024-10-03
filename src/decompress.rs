@@ -1,8 +1,12 @@
 use simd_adler32::Adler32;
 
-use crate::tables::{
-    self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FDEFLATE_DIST_DECODE_TABLE,
-    FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
+use crate::{
+    huffman,
+    tables::{
+        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA,
+        FDEFLATE_DIST_DECODE_TABLE, FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS,
+        LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
+    },
 };
 
 /// An error encountered while decompressing a deflate stream.
@@ -54,9 +58,9 @@ struct BlockHeader {
     code_lengths: [u8; 320],
 }
 
-const LITERAL_ENTRY: u32 = 0x8000;
-const EXCEPTIONAL_ENTRY: u32 = 0x4000;
-const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
+pub const LITERAL_ENTRY: u32 = 0x8000;
+pub const EXCEPTIONAL_ENTRY: u32 = 0x4000;
+pub const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
 
 /// The Decompressor state for a compressed block.
 ///
@@ -414,144 +418,20 @@ impl Decompressor {
             return Err(DecompressionError::BadLiteralLengthHuffmanTree);
         }
 
-        let lengths = &code_lengths[..hlit];
-
-        // Count the number of symbols with each code length.
-        let mut histogram = [0; 16];
-        for &length in lengths {
-            histogram[length as usize] += 1;
-        }
-
-        // Determine the maximum code length.
-        let mut max_length = 15;
-        while max_length > 1 && histogram[max_length] == 0 {
-            max_length -= 1;
-        }
-
-        // Sort symbols by code length. Given the histogram, we can determine the starting offset
-        // for each code length.
-        let mut offsets = [0; 16];
-        let mut codespace_used = 0;
-        offsets[1] = histogram[0];
-        for i in 1..max_length {
-            offsets[i + 1] = offsets[i] + histogram[i];
-            codespace_used = (codespace_used << 1) + histogram[i];
-        }
-        codespace_used = (codespace_used << 1) + histogram[max_length];
-
-        // Check that the provided lengths form a valid Huffman tree.
-        if codespace_used != (1 << max_length) {
+        let mut codes = [0; 288];
+        compression.secondary_table.clear();
+        if !huffman::build_table(
+            &code_lengths[..hlit],
+            &mut codes[..hlit],
+            &mut compression.litlen_table,
+            &mut compression.secondary_table,
+        ) {
             return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
 
-        // Sort the symbols by code length.
-        let mut sorted_symbols = [0; 288];
-        for symbol in 0..lengths.len() {
-            let length = lengths[symbol];
-            sorted_symbols[offsets[length as usize]] = symbol;
-            offsets[length as usize] += 1;
-        }
-
-        fn next_codeword(mut codeword: usize, table_size: usize) -> usize {
-            if codeword == table_size - 1 {
-                return codeword;
-            }
-
-            // If the codeword isn't all ones (which is the final code), then we need to
-            // advance it to the next code.
-            //
-            // This bit manipulation is equivelent to `(codeword.reverse_bits() + 1).reverse_bits()`
-            // but is more efficient.
-            let adv = (usize::BITS - 1) - (codeword ^ (table_size - 1)).leading_zeros();
-            let bit = 1 << adv;
-            codeword &= bit - 1;
-            codeword |= bit;
-            codeword
-        }
-
-        let mut codeword = 0;
-        let mut codes = [0; 288];
-        let mut i = histogram[0];
-
-        // Populate the primary decoding table
-        for length in 1..=12 {
-            let current_table_end = 1 << length;
-
-            // Loop over all symbols with the current code length and set their table entries.
-            for _ in 0..histogram[length] {
-                let symbol = sorted_symbols[i];
-                i += 1;
-
-                let entry = match symbol {
-                    0..=255 => ((symbol as u32) << 16) | LITERAL_ENTRY | (1 << 8),
-                    256 => EXCEPTIONAL_ENTRY,
-                    257..=285 => {
-                        (LEN_SYM_TO_LEN_BASE[symbol - 257] as u32) << 16
-                            | (LEN_SYM_TO_LEN_EXTRA[symbol - 257] as u32) << 8
-                    }
-                    _ => EXCEPTIONAL_ENTRY,
-                };
-                compression.litlen_table[codeword] = entry | length as u32;
-
-                codes[symbol] = codeword;
-                codeword = next_codeword(codeword, current_table_end);
-            }
-
-            // If we aren't at the maximum table size, double the size of the table.
-            if length < 12 {
-                compression
-                    .litlen_table
-                    .copy_within(0..current_table_end, current_table_end);
-            }
-        }
-
-        let mut subtable_start = 0;
-        let mut subtable_prefix = !0;
-        compression.secondary_table.clear();
-        for length in 13..=max_length {
-            for _ in 0..histogram[length] {
-                if codeword & 0xfff != subtable_prefix {
-                    subtable_prefix = codeword & 0xfff;
-                    subtable_start = compression.secondary_table.len();
-                    compression.litlen_table[subtable_prefix] =
-                        ((subtable_start as u32) << 16) | EXCEPTIONAL_ENTRY | SECONDARY_TABLE_ENTRY;
-                    compression.secondary_table.extend_from_slice(&[0; 8]);
-                }
-
-                let symbol = sorted_symbols[i];
-                i += 1;
-
-                codes[symbol] = codeword;
-
-                let mut s = codeword >> 12;
-                while s < 8 {
-                    debug_assert_eq!(compression.secondary_table[subtable_start + s as usize], 0);
-                    compression.secondary_table[subtable_start + s as usize] =
-                        ((symbol as u16) << 4) | (length as u16);
-                    s += 1 << (length - 12);
-                }
-
-                // compression.secondary_table[subtable_start + (codeword >> 12) as usize] =
-                //     ((symbol as u16) << 4) | length as u16;
-
-                codeword = next_codeword(codeword, 1 << length);
-            }
-
-            // if length < max_length && codeword & 0xfff == subtable_prefix {
-            //     compression.litlen_table[subtable_prefix] = subtable_start as u32
-            //         | ((length - 12 + 1) << 8) as u32
-            //         | EXCEPTIONAL_ENTRY
-            //         | SECONDARY_TABLE_ENTRY;
-
-            //     compression
-            //         .secondary_table
-            //         .extend_from_within(subtable_start..);
-            // }
-        }
-
         compression.eof_code = codes[256] as u16;
-        compression.eof_mask = (1 << lengths[256]) - 1;
-        compression.eof_bits = lengths[256];
+        compression.eof_mask = (1 << code_lengths[256]) - 1;
+        compression.eof_bits = code_lengths[256];
 
         // Build the distance code table.
         let lengths = &code_lengths[288..320];
