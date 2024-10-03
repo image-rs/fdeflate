@@ -1,8 +1,4 @@
-use crate::{
-    decompress::{EXCEPTIONAL_ENTRY, LITERAL_ENTRY, SECONDARY_TABLE_ENTRY},
-    tables::{LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA},
-    DecompressionError,
-};
+use crate::decompress::{EXCEPTIONAL_ENTRY, SECONDARY_TABLE_ENTRY};
 
 /// Return the next code, or if the codeword is already all ones (which is the final code), return
 /// the same code again.
