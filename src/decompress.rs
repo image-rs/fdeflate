@@ -1,7 +1,7 @@
 use simd_adler32::Adler32;
 
 use crate::{
-    huffman,
+    huffman::{self, build_table},
     tables::{
         self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA,
         FDEFLATE_DIST_DECODE_TABLE, FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS,
@@ -54,7 +54,7 @@ struct BlockHeader {
     num_lengths_read: usize,
 
     /// Low 3-bits are code length code length, high 5-bits are code length code.
-    table: [u8; 128],
+    table: [u32; 128],
     code_lengths: [u8; 320],
 }
 
@@ -297,19 +297,10 @@ impl Decompressor {
                 self.fill_buffer(remaining_input);
             }
         }
-        let code_length_codes: [u16; 19] = crate::compute_codes(&code_length_lengths)
-            .ok_or(DecompressionError::BadCodeLengthHuffmanTree)?;
 
-        self.header.table = [255; 128];
-        for i in 0..19 {
-            let length = code_length_lengths[i];
-            if length > 0 {
-                let mut j = code_length_codes[i];
-                while j < 128 {
-                    self.header.table[j as usize] = ((i as u8) << 3) | length;
-                    j += 1 << length;
-                }
-            }
+        let mut codes = [0; 19];
+        if !build_table(&code_length_lengths, &[], &mut codes, &mut self.header.table, &mut Vec::new()) {
+            return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
 
         self.state = State::CodeLengths;
@@ -327,8 +318,8 @@ impl Decompressor {
 
             let code = self.peak_bits(7);
             let entry = self.header.table[code as usize];
-            let length = entry & 0x7;
-            let symbol = entry >> 3;
+            let length = (entry & 0x7) as u8;
+            let symbol = (entry >> 16) as u8;
 
             debug_assert!(length != 0);
             match symbol {

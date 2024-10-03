@@ -79,7 +79,7 @@ pub fn build_table(
             i += 1;
 
             primary_table[codeword as usize] =
-                entries.get(symbol).cloned().unwrap_or((symbol as u32) << 4) | length as u32;
+                entries.get(symbol).cloned().unwrap_or((symbol as u32) << 16) | length as u32;
 
             codes[symbol] = codeword;
             codeword = next_codeword(codeword, current_table_end as u16);
