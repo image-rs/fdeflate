@@ -1,3 +1,5 @@
+use crate::decompress::{EXCEPTIONAL_ENTRY, LITERAL_ENTRY};
+
 /// Hard-coded Huffman codes used regardless of the input.
 ///
 /// These values work well for PNGs with some form of filtering enabled, but will likely make most
@@ -84,6 +86,34 @@ pub(crate) const DIST_SYM_TO_DIST_BASE: [u16; 30] = [
     1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
+
+pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
+    let mut entries = [EXCEPTIONAL_ENTRY; 288];
+    let mut i = 0;
+    while i < 256 {
+        entries[i] = (i as u32) << 16 | LITERAL_ENTRY | (1 << 8);
+        i += 1;
+    }
+
+    let mut i = 257;
+    while i < 286 {
+        entries[i] = (LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16
+            | (LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8;
+        i += 1;
+    }
+    entries
+};
+
+pub(crate) const DISTANCE_TABLE_ENTRIES: [u32; 32] = {
+    let mut entries = [0; 32];
+    let mut i = 0;
+    while i < 30 {
+        entries[i] =
+            (DIST_SYM_TO_DIST_BASE[i] as u32) << 16 | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8;
+        i += 1;
+    }
+    entries
+};
 
 pub(crate) const FDEFLATE_LITLEN_DECODE_TABLE: [u32; 4096] = [
     0x8204, 0x28206, 0x18205, 0xfa8208, 0x2008206, 0x38207, 0xff8205, 0xf4820a, 0x1008205,

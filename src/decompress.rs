@@ -5,7 +5,7 @@ use crate::{
     tables::{
         self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA,
         FDEFLATE_DIST_DECODE_TABLE, FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS,
-        LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
+        LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES,
     },
 };
 
@@ -422,6 +422,7 @@ impl Decompressor {
         compression.secondary_table.clear();
         if !huffman::build_table(
             &code_lengths[..hlit],
+            &LITLEN_TABLE_ENTRIES,
             &mut codes[..hlit],
             &mut compression.litlen_table,
             &mut compression.secondary_table,
@@ -597,9 +598,10 @@ impl Decompressor {
                         litlen_code_bits,
                     )
                 } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
-                    let secondary_index = litlen_entry >> 16;
-                    let secondary_entry = self.compression.secondary_table
-                        [secondary_index as usize + ((bits >> 12) & 0x7) as usize];
+                    let secondary_table_index =
+                        (litlen_entry >> 16) + ((bits >> 12) as u32 & (litlen_entry & 0xff));
+                    let secondary_entry =
+                        self.compression.secondary_table[secondary_table_index as usize];
                     let litlen_symbol = secondary_entry >> 4;
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 

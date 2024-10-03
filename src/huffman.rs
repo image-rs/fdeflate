@@ -1,4 +1,8 @@
-use crate::{decompress::{EXCEPTIONAL_ENTRY, LITERAL_ENTRY, SECONDARY_TABLE_ENTRY}, tables::{LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA}, DecompressionError};
+use crate::{
+    decompress::{EXCEPTIONAL_ENTRY, LITERAL_ENTRY, SECONDARY_TABLE_ENTRY},
+    tables::{LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA},
+    DecompressionError,
+};
 
 fn next_codeword(mut codeword: u16, table_size: u16) -> u16 {
     if codeword == table_size - 1 {
@@ -19,6 +23,7 @@ fn next_codeword(mut codeword: u16, table_size: u16) -> u16 {
 
 pub fn build_table(
     lengths: &[u8],
+    entries: &[u32],
     codes: &mut [u16],
     primary_table: &mut [u32],
     secondary_table: &mut Vec<u16>,
@@ -73,16 +78,8 @@ pub fn build_table(
             let symbol = sorted_symbols[i];
             i += 1;
 
-            let entry = match symbol {
-                0..=255 => ((symbol as u32) << 16) | LITERAL_ENTRY | (1 << 8),
-                256 => EXCEPTIONAL_ENTRY,
-                257..=285 => {
-                    (LEN_SYM_TO_LEN_BASE[symbol - 257] as u32) << 16
-                        | (LEN_SYM_TO_LEN_EXTRA[symbol - 257] as u32) << 8
-                }
-                _ => EXCEPTIONAL_ENTRY,
-            };
-            primary_table[codeword as usize] = entry | length as u32;
+            primary_table[codeword as usize] =
+                entries.get(symbol).cloned().unwrap_or((symbol as u32) << 4) | length as u32;
 
             codes[symbol] = codeword;
             codeword = next_codeword(codeword, current_table_end as u16);
@@ -94,6 +91,10 @@ pub fn build_table(
         }
     }
 
+    let secondary_table_bits = max_length - primary_table_bits;
+    let secondary_table_size = 1 << secondary_table_bits;
+    let secondary_table_mask = secondary_table_size - 1;
+
     let mut subtable_start = 0;
     let mut subtable_prefix = !0;
     secondary_table.clear();
@@ -102,9 +103,11 @@ pub fn build_table(
             if codeword & 0xfff != subtable_prefix {
                 subtable_prefix = codeword & 0xfff;
                 subtable_start = secondary_table.len();
-                primary_table[subtable_prefix as usize] =
-                    ((subtable_start as u32) << 16) | EXCEPTIONAL_ENTRY | SECONDARY_TABLE_ENTRY;
-                secondary_table.extend_from_slice(&[0; 8]);
+                primary_table[subtable_prefix as usize] = ((subtable_start as u32) << 16)
+                    | EXCEPTIONAL_ENTRY
+                    | SECONDARY_TABLE_ENTRY
+                    | secondary_table_mask as u32;
+                secondary_table.resize(subtable_start + secondary_table_size, 0);
             }
 
             let symbol = sorted_symbols[i];
@@ -113,7 +116,7 @@ pub fn build_table(
             codes[symbol] = codeword;
 
             let mut s = codeword >> primary_table_bits;
-            while s < 8 {
+            while s < secondary_table_size as u16 {
                 debug_assert_eq!(secondary_table[subtable_start + s as usize], 0);
                 secondary_table[subtable_start + s as usize] =
                     ((symbol as u16) << 4) | (length as u16);
