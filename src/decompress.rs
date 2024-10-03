@@ -63,55 +63,29 @@ pub const EXCEPTIONAL_ENTRY: u32 = 0x4000;
 pub const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
 
 /// The Decompressor state for a compressed block.
-///
-/// The main litlen_table uses a 12-bit input to lookup the meaning of the symbol. The table is
-/// split into 4 sections:
-///
-///   aaaaaaaa_bbbbbbbb_1000yyyy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
-///   0000000z_zzzzzzzz_00000yyy_0000xxxx  x = input_advance_bits, y = extra_bits, z = distance_base (length)
-///   00000000_00000000_01000000_0000xxxx  x = input_advance_bits (EOF)
-///   0000xxxx_xxxxxxxx_01100000_00000000  x = secondary_table_index
-///   00000000_00000000_01000000_00000000  invalid code
-///
-/// The distance table is a 512-entry table that maps 9 bits of distance symbols to their meaning.
-///
-///   00000000_00000000_00000000_00000000     symbol is more than 9 bits
-///   zzzzzzzz_zzzzzzzz_0000yyyy_0000xxxx     x = input_advance_bits, y = extra_bits, z = distance_base
 #[repr(align(64))]
 #[derive(Eq, PartialEq, Debug)]
 struct CompressedBlock {
     litlen_table: [u32; 4096],
-    dist_table: [u32; 512],
-
-    dist_symbol_lengths: [u8; 30],
-    dist_symbol_masks: [u16; 30],
-    dist_symbol_codes: [u16; 30],
-
     secondary_table: Vec<u16>,
+
+    dist_table: [u32; 512],
+    dist_secondary_table: Vec<u16>,
+
     eof_code: u16,
     eof_mask: u16,
     eof_bits: u8,
 }
 
-const FDEFLATE_COMPRESSED_BLOCK: CompressedBlock = CompressedBlock {
-    litlen_table: FDEFLATE_LITLEN_DECODE_TABLE,
-    dist_table: FDEFLATE_DIST_DECODE_TABLE,
-    dist_symbol_lengths: [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ],
-    dist_symbol_masks: [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ],
-    dist_symbol_codes: [
-        0, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
-        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
-        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
-    ],
-    secondary_table: Vec::new(),
-    eof_code: 0x8ff,
-    eof_mask: 0xfff,
-    eof_bits: 0xc,
-};
+// const FDEFLATE_COMPRESSED_BLOCK: CompressedBlock = CompressedBlock {
+//     litlen_table: FDEFLATE_LITLEN_DECODE_TABLE,
+//     secondary_table: Vec::new(),
+//     dist_table: FDEFLATE_DIST_DECODE_TABLE,
+//     dist_secondary_table: Vec::new(),
+//     eof_code: 0x8ff,
+//     eof_mask: 0xfff,
+//     eof_bits: 0xc,
+// };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum State {
@@ -162,9 +136,7 @@ impl Decompressor {
                 litlen_table: [0; 4096],
                 dist_table: [0; 512],
                 secondary_table: Vec::new(),
-                dist_symbol_lengths: [0; 30],
-                dist_symbol_masks: [0; 30],
-                dist_symbol_codes: [0xffff; 30],
+                dist_secondary_table: Vec::new(),
                 eof_code: 0,
                 eof_mask: 0,
                 eof_bits: 0,
@@ -299,7 +271,14 @@ impl Decompressor {
         }
 
         let mut codes = [0; 19];
-        if !build_table(&code_length_lengths, &[], &mut codes, &mut self.header.table, &mut Vec::new()) {
+        if !build_table(
+            &code_length_lengths,
+            &[],
+            &mut codes,
+            &mut self.header.table,
+            &mut Vec::new(),
+            false,
+        ) {
             return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
 
@@ -380,19 +359,19 @@ impl Decompressor {
             self.header.code_lengths[i] = 0;
         }
 
-        if self.header.hdist == 1
-            && self.header.code_lengths[..286] == tables::HUFFMAN_LENGTHS
-            && self.header.code_lengths[288] == 1
-        {
-            self.compression = FDEFLATE_COMPRESSED_BLOCK;
-        } else {
+        // if self.header.hdist == 1
+        //     && self.header.code_lengths[..286] == tables::HUFFMAN_LENGTHS
+        //     && self.header.code_lengths[288] == 1
+        // {
+        //     self.compression = FDEFLATE_COMPRESSED_BLOCK;
+        // } else {
             Self::build_tables(
                 self.header.hlit,
                 &self.header.code_lengths,
                 &mut self.compression,
                 6,
             )?;
-        }
+        // }
         self.state = State::CompressedData;
         Ok(())
     }
@@ -417,6 +396,7 @@ impl Decompressor {
             &mut codes[..hlit],
             &mut compression.litlen_table,
             &mut compression.secondary_table,
+            false,
         ) {
             return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
@@ -428,44 +408,17 @@ impl Decompressor {
         // Build the distance code table.
         let lengths = &code_lengths[288..320];
         if lengths == [0; 32] {
-            compression.dist_symbol_masks = [0; 30];
-            compression.dist_symbol_codes = [0xffff; 30];
-            compression.dist_table.fill(0);
         } else {
-            let codes: [u16; 32] = match crate::compute_codes(&lengths.try_into().unwrap()) {
-                Some(codes) => codes,
-                None => {
-                    if lengths.iter().filter(|&&l| l != 0).count() != 1 {
-                        return Err(DecompressionError::BadDistanceHuffmanTree);
-                    }
-                    [0; 32]
-                }
-            };
-
-            compression.dist_symbol_codes.copy_from_slice(&codes[..30]);
-            compression
-                .dist_symbol_lengths
-                .copy_from_slice(&lengths[..30]);
-            compression.dist_table.fill(0);
-            for i in 0..30 {
-                let length = lengths[i];
-                let code = codes[i];
-                if length == 0 {
-                    compression.dist_symbol_masks[i] = 0;
-                    compression.dist_symbol_codes[i] = 0xffff;
-                } else {
-                    compression.dist_symbol_masks[i] = (1 << lengths[i]) - 1;
-                    if lengths[i] <= 9 {
-                        let mut j = code;
-                        while j < 512 {
-                            compression.dist_table[j as usize] = (DIST_SYM_TO_DIST_BASE[i] as u32)
-                                << 16
-                                | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8
-                                | length as u32;
-                            j += 1 << lengths[i];
-                        }
-                    }
-                }
+            let mut dist_codes = [0; 32];
+            if !huffman::build_table(
+                lengths,
+                &tables::DISTANCE_TABLE_ENTRIES,
+                &mut dist_codes,
+                &mut compression.dist_table,
+                &mut compression.dist_secondary_table,
+                true,
+            ) {
+                return Err(DecompressionError::BadDistanceHuffmanTree);
             }
         }
 
@@ -645,30 +598,31 @@ impl Decompressor {
             // innumerable::event!("length", litlen_code_bits + length_extra_bits);
 
             let dist_entry = self.compression.dist_table[(bits & 0x1ff) as usize];
-            let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry != 0 {
+            let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry & LITERAL_ENTRY != 0 {
                 (
                     (dist_entry >> 16) as u16,
-                    (dist_entry >> 8) as u8,
+                    (dist_entry >> 8) as u8 & 0xf,
                     dist_entry as u8,
                 )
             } else if self.nbits > litlen_code_bits + length_extra_bits + 9 {
-                let mut dist_extra_bits = 0;
-                let mut dist_base = 0;
-                let mut dist_advance_bits = 0;
-                for i in 0..self.compression.dist_symbol_lengths.len() {
-                    if bits as u16 & self.compression.dist_symbol_masks[i]
-                        == self.compression.dist_symbol_codes[i]
-                    {
-                        dist_extra_bits = DIST_SYM_TO_DIST_EXTRA[i];
-                        dist_base = DIST_SYM_TO_DIST_BASE[i];
-                        dist_advance_bits = self.compression.dist_symbol_lengths[i];
-                        break;
-                    }
-                }
-                if dist_advance_bits == 0 {
+                if dist_entry == 0 {
                     return Err(DecompressionError::InvalidDistanceCode);
                 }
-                (dist_base, dist_extra_bits, dist_advance_bits)
+
+                let secondary_table_index =
+                    (dist_entry >> 16) + ((bits >> 9) as u32 & (dist_entry & 0xff));
+                let secondary_entry =
+                    self.compression.dist_secondary_table[secondary_table_index as usize];
+                let dist_symbol = (secondary_entry >> 4) as usize;
+                if dist_symbol >= 30 {
+                    return Err(DecompressionError::InvalidDistanceCode);
+                }
+
+                (
+                    DIST_SYM_TO_DIST_BASE[dist_symbol],
+                    DIST_SYM_TO_DIST_EXTRA[dist_symbol],
+                    (secondary_entry & 0xf) as u8,
+                )
             } else {
                 break;
             };
@@ -1053,10 +1007,8 @@ mod tests {
         let mut compression = CompressedBlock {
             litlen_table: [0; 4096],
             dist_table: [0; 512],
-            dist_symbol_lengths: [0; 30],
-            dist_symbol_masks: [0; 30],
-            dist_symbol_codes: [0; 30],
             secondary_table: Vec::new(),
+            dist_secondary_table: Vec::new(),
             eof_code: 0,
             eof_mask: 0,
             eof_bits: 0,

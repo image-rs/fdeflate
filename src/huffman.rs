@@ -4,16 +4,13 @@ use crate::{
     DecompressionError,
 };
 
+/// Return the next code, or if the codeword is already all ones (which is the final code), return
+/// the same code again.
 fn next_codeword(mut codeword: u16, table_size: u16) -> u16 {
     if codeword == table_size - 1 {
         return codeword;
     }
 
-    // If the codeword isn't all ones (which is the final code), then we need to
-    // advance it to the next code.
-    //
-    // This bit manipulation is equivelent to `(codeword.reverse_bits() + 1).reverse_bits()`
-    // but is more efficient.
     let adv = (u16::BITS - 1) - (codeword ^ (table_size - 1)).leading_zeros();
     let bit = 1 << adv;
     codeword &= bit - 1;
@@ -27,6 +24,7 @@ pub fn build_table(
     codes: &mut [u16],
     primary_table: &mut [u32],
     secondary_table: &mut Vec<u16>,
+    is_distance_table: bool,
 ) -> bool {
     // Count the number of symbols with each code length.
     let mut histogram = [0; 16];
@@ -38,6 +36,27 @@ pub fn build_table(
     let mut max_length = 15;
     while max_length > 1 && histogram[max_length] == 0 {
         max_length -= 1;
+    }
+
+    if is_distance_table {
+        if max_length == 0 {
+            primary_table.fill(0);
+            secondary_table.clear();
+            return true;
+        } else if max_length == 1 && histogram[1] == 1 {
+            let symbol = lengths.iter().position(|&l| l == 1).unwrap();
+            codes[symbol] = 0;
+            let entry = entries
+                .get(symbol)
+                .cloned()
+                .unwrap_or((symbol as u32) << 16)
+                | 1;
+            for chunk in primary_table.chunks_mut(2) {
+                chunk[0] = entry;
+                chunk[1] = 0;
+            }
+            return true;
+        }
     }
 
     // Sort symbols by code length. Given the histogram, we can determine the starting offset
@@ -68,6 +87,7 @@ pub fn build_table(
     let mut i = histogram[0];
 
     let primary_table_bits = primary_table.len().ilog2() as usize;
+    let primary_table_mask = (1 << primary_table_bits) - 1;
 
     // Populate the primary decoding table
     for length in 1..=primary_table_bits {
@@ -78,8 +98,11 @@ pub fn build_table(
             let symbol = sorted_symbols[i];
             i += 1;
 
-            primary_table[codeword as usize] =
-                entries.get(symbol).cloned().unwrap_or((symbol as u32) << 16) | length as u32;
+            primary_table[codeword as usize] = entries
+                .get(symbol)
+                .cloned()
+                .unwrap_or((symbol as u32) << 16)
+                | length as u32;
 
             codes[symbol] = codeword;
             codeword = next_codeword(codeword, current_table_end as u16);
@@ -91,54 +114,53 @@ pub fn build_table(
         }
     }
 
-    let secondary_table_bits = max_length - primary_table_bits;
-    let secondary_table_size = 1 << secondary_table_bits;
-    let secondary_table_mask = secondary_table_size - 1;
-
-    let mut subtable_start = 0;
-    let mut subtable_prefix = !0;
     secondary_table.clear();
-    for length in (primary_table_bits + 1)..=max_length {
-        for _ in 0..histogram[length] {
-            if codeword & 0xfff != subtable_prefix {
-                subtable_prefix = codeword & 0xfff;
-                subtable_start = secondary_table.len();
-                primary_table[subtable_prefix as usize] = ((subtable_start as u32) << 16)
-                    | EXCEPTIONAL_ENTRY
-                    | SECONDARY_TABLE_ENTRY
-                    | secondary_table_mask as u32;
-                secondary_table.resize(subtable_start + secondary_table_size, 0);
+    if max_length > primary_table_bits {
+        let secondary_table_bits = max_length - primary_table_bits;
+        let secondary_table_size = 1 << secondary_table_bits;
+        let secondary_table_mask = secondary_table_size - 1;
+
+        let mut subtable_start = 0;
+        let mut subtable_prefix = !0;
+        for length in (primary_table_bits + 1)..=max_length {
+            for _ in 0..histogram[length] {
+                if codeword & primary_table_mask != subtable_prefix {
+                    subtable_prefix = codeword & primary_table_mask;
+                    subtable_start = secondary_table.len();
+                    primary_table[subtable_prefix as usize] = ((subtable_start as u32) << 16)
+                        | EXCEPTIONAL_ENTRY
+                        | SECONDARY_TABLE_ENTRY
+                        | secondary_table_mask as u32;
+                    secondary_table.resize(subtable_start + secondary_table_size, 0);
+                }
+
+                let symbol = sorted_symbols[i];
+                i += 1;
+
+                codes[symbol] = codeword;
+
+                let mut s = codeword >> primary_table_bits;
+                while s < secondary_table_size as u16 {
+                    debug_assert_eq!(secondary_table[subtable_start + s as usize], 0);
+                    secondary_table[subtable_start + s as usize] =
+                        ((symbol as u16) << 4) | (length as u16);
+                    s += 1 << (length - primary_table_bits);
+                }
+
+                codeword = next_codeword(codeword, 1 << length);
             }
 
-            let symbol = sorted_symbols[i];
-            i += 1;
+            // if length < max_length && codeword & 0xfff == subtable_prefix {
+            //     compression.litlen_table[subtable_prefix] = subtable_start as u32
+            //         | ((length - 12 + 1) << 8) as u32
+            //         | EXCEPTIONAL_ENTRY
+            //         | SECONDARY_TABLE_ENTRY;
 
-            codes[symbol] = codeword;
-
-            let mut s = codeword >> primary_table_bits;
-            while s < secondary_table_size as u16 {
-                debug_assert_eq!(secondary_table[subtable_start + s as usize], 0);
-                secondary_table[subtable_start + s as usize] =
-                    ((symbol as u16) << 4) | (length as u16);
-                s += 1 << (length - primary_table_bits);
-            }
-
-            // compression.secondary_table[subtable_start + (codeword >> 12) as usize] =
-            //     ((symbol as u16) << 4) | length as u16;
-
-            codeword = next_codeword(codeword, 1 << length);
+            //     compression
+            //         .secondary_table
+            //         .extend_from_within(subtable_start..);
+            // }
         }
-
-        // if length < max_length && codeword & 0xfff == subtable_prefix {
-        //     compression.litlen_table[subtable_prefix] = subtable_start as u32
-        //         | ((length - 12 + 1) << 8) as u32
-        //         | EXCEPTIONAL_ENTRY
-        //         | SECONDARY_TABLE_ENTRY;
-
-        //     compression
-        //         .secondary_table
-        //         .extend_from_within(subtable_start..);
-        // }
     }
 
     true

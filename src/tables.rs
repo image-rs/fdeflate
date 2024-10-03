@@ -87,6 +87,14 @@ pub(crate) const DIST_SYM_TO_DIST_BASE: [u16; 30] = [
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
 
+/// The main litlen_table uses a 12-bit input to lookup the meaning of the symbol. The table is
+/// split into 4 sections:
+///
+///   aaaaaaaa_bbbbbbbb_1000yyyy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
+///   0000000z_zzzzzzzz_00000yyy_0000xxxx  x = input_advance_bits, y = extra_bits, z = distance_base (length)
+///   00000000_00000000_01000000_0000xxxx  x = input_advance_bits (EOF)
+///   0000xxxx_xxxxxxxx_01100000_00000000  x = secondary_table_index
+///   00000000_00000000_01000000_00000000  invalid code
 pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
     let mut entries = [EXCEPTIONAL_ENTRY; 288];
     let mut i = 0;
@@ -104,12 +112,16 @@ pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
     entries
 };
 
+/// The distance table is a 512-entry table that maps 9 bits of distance symbols to their meaning.
+///
+///   00000000_00000000_00000000_00000000     symbol is more than 9 bits
+///   zzzzzzzz_zzzzzzzz_0000yyyy_0000xxxx     x = input_advance_bits, y = extra_bits, z = distance_base
 pub(crate) const DISTANCE_TABLE_ENTRIES: [u32; 32] = {
     let mut entries = [0; 32];
     let mut i = 0;
     while i < 30 {
         entries[i] =
-            (DIST_SYM_TO_DIST_BASE[i] as u32) << 16 | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8;
+            (DIST_SYM_TO_DIST_BASE[i] as u32) << 16 | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8 | LITERAL_ENTRY;
         i += 1;
     }
     entries
