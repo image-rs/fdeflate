@@ -38,6 +38,7 @@ pub fn build_table(
         max_length -= 1;
     }
 
+    // Handle zero and one symbol huffman codes (which are only allowed for distance codes).
     if is_distance_table {
         if max_length == 0 {
             primary_table.fill(0);
@@ -86,10 +87,9 @@ pub fn build_table(
     let mut codeword = 0u16;
     let mut i = histogram[0];
 
+    // Populate the primary decoding table
     let primary_table_bits = primary_table.len().ilog2() as usize;
     let primary_table_mask = (1 << primary_table_bits) - 1;
-
-    // Populate the primary decoding table
     for length in 1..=primary_table_bits {
         let current_table_end = 1 << length;
 
@@ -114,52 +114,46 @@ pub fn build_table(
         }
     }
 
+    // Populate the secondary decoding table.
     secondary_table.clear();
     if max_length > primary_table_bits {
-        let secondary_table_bits = max_length - primary_table_bits;
-        let secondary_table_size = 1 << secondary_table_bits;
-        let secondary_table_mask = secondary_table_size - 1;
-
         let mut subtable_start = 0;
         let mut subtable_prefix = !0;
         for length in (primary_table_bits + 1)..=max_length {
+            let subtable_size = 1 << (length - primary_table_bits);
             for _ in 0..histogram[length] {
+                // If the codeword's prefix doesn't match the current subtable, create a new
+                // subtable.
                 if codeword & primary_table_mask != subtable_prefix {
                     subtable_prefix = codeword & primary_table_mask;
                     subtable_start = secondary_table.len();
                     primary_table[subtable_prefix as usize] = ((subtable_start as u32) << 16)
                         | EXCEPTIONAL_ENTRY
                         | SECONDARY_TABLE_ENTRY
-                        | secondary_table_mask as u32;
-                    secondary_table.resize(subtable_start + secondary_table_size, 0);
+                        | (subtable_size as u32 - 1);
+                    secondary_table.resize(subtable_start + subtable_size, 0);
                 }
 
+                // Lookup the symbol.
                 let symbol = sorted_symbols[i];
                 i += 1;
 
+                // Insert the symbol into the secondary table and advance to the next codeword.
                 codes[symbol] = codeword;
-
-                let mut s = codeword >> primary_table_bits;
-                while s < secondary_table_size as u16 {
-                    debug_assert_eq!(secondary_table[subtable_start + s as usize], 0);
-                    secondary_table[subtable_start + s as usize] =
-                        ((symbol as u16) << 4) | (length as u16);
-                    s += 1 << (length - primary_table_bits);
-                }
-
+                secondary_table[subtable_start + (codeword >> primary_table_bits) as usize] =
+                    ((symbol as u16) << 4) | (length as u16);
                 codeword = next_codeword(codeword, 1 << length);
             }
 
-            // if length < max_length && codeword & 0xfff == subtable_prefix {
-            //     compression.litlen_table[subtable_prefix] = subtable_start as u32
-            //         | ((length - 12 + 1) << 8) as u32
-            //         | EXCEPTIONAL_ENTRY
-            //         | SECONDARY_TABLE_ENTRY;
-
-            //     compression
-            //         .secondary_table
-            //         .extend_from_within(subtable_start..);
-            // }
+            // If there are more codes with the same subtable prefix, extend the subtable.
+            if length < max_length && codeword & primary_table_mask == subtable_prefix {
+                secondary_table.extend_from_within(subtable_start..);
+                let subtable_size = secondary_table.len() - subtable_start;
+                primary_table[subtable_prefix as usize] = ((subtable_start as u32) << 16)
+                    | EXCEPTIONAL_ENTRY
+                    | SECONDARY_TABLE_ENTRY
+                    | (subtable_size as u32 - 1);
+            }
         }
     }
 

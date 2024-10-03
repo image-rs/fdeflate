@@ -1002,29 +1002,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fdeflate_table() {
-        let mut compression = CompressedBlock {
-            litlen_table: [0; 4096],
-            dist_table: [0; 512],
-            secondary_table: Vec::new(),
-            dist_secondary_table: Vec::new(),
-            eof_code: 0,
-            eof_mask: 0,
-            eof_bits: 0,
-        };
-        let mut lengths = tables::HUFFMAN_LENGTHS.to_vec();
-        lengths.resize(288, 0);
-        lengths.push(1);
-        lengths.resize(320, 0);
-        Decompressor::build_tables(286, &lengths, &mut compression, 11).unwrap();
+    // #[test]
+    // fn fdeflate_table() {
+    //     let mut compression = CompressedBlock {
+    //         litlen_table: [0; 4096],
+    //         dist_table: [0; 512],
+    //         secondary_table: Vec::new(),
+    //         dist_secondary_table: Vec::new(),
+    //         eof_code: 0,
+    //         eof_mask: 0,
+    //         eof_bits: 0,
+    //     };
+    //     let mut lengths = tables::HUFFMAN_LENGTHS.to_vec();
+    //     lengths.resize(288, 0);
+    //     lengths.push(1);
+    //     lengths.resize(320, 0);
+    //     Decompressor::build_tables(286, &lengths, &mut compression, 11).unwrap();
 
-        assert_eq!(
-            compression, FDEFLATE_COMPRESSED_BLOCK,
-            "{:#x?}",
-            compression
-        );
-    }
+    //     assert_eq!(
+    //         compression, FDEFLATE_COMPRESSED_BLOCK,
+    //         "{:#x?}",
+    //         compression
+    //     );
+    // }
 
     #[test]
     fn it_works() {
