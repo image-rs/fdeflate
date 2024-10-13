@@ -439,19 +439,27 @@ impl Decompressor {
         output: &mut [u8],
         mut output_index: usize,
     ) -> Result<usize, DecompressionError> {
+        // Fast decoding loop.
+        //
+        // This loop is optimized for speed and is the main decoding loop for the decompressor,
+        // which is used when there are at least 8 bytes of input and output data available. It
+        // assumes that the bitbuffer is full (nbits >= 56) and that litlen_entry has been loaded.
+        //
+        // These assumptions enable a few optimizations:
+        // - Nearly all checks for nbits are avoided.
+        // - Checking the input size is optimized out in the refill function call.
+        // - The litlen_entry for the next loop iteration can be loaded in parallel with refilling
+        //   the bit buffer. This is because when the input is non-empty, the bit buffer actually
+        //   has 64-bits of valid data (even though nbits will be in 56..=63).
         self.fill_buffer(remaining_input);
         let mut litlen_entry = self.compression.litlen_table[(self.buffer & 0xfff) as usize];
         while self.state == State::CompressedData
-            && output_index + 8 < output.len()
+            && output_index + 8 <= output.len()
             && remaining_input.len() >= 8
         {
-            debug_assert!(self.nbits >= 48);
-
-            let mut litlen_code_bits = litlen_entry as u8;
-
             let mut bits;
+            let mut litlen_code_bits = litlen_entry as u8;
             if litlen_entry & LITERAL_ENTRY != 0 {
-                // Ultra-fast path: do 3 more consecutive table lookups and bail if any of them need the slow path.
                 let litlen_entry2 = self.compression.litlen_table
                     [(self.buffer >> litlen_code_bits & 0xfff) as usize];
                 let litlen_code_bits2 = litlen_entry2 as u8;
@@ -462,61 +470,8 @@ impl Decompressor {
                     >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3)
                     & 0xfff)
                     as usize];
-                // let litlen_code_bits4 = litlen_entry4 as u8;
-                // if litlen_entry2 & litlen_entry3 & litlen_entry4 & LITERAL_ENTRY != 0 {
-                //     let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
-                //     let advance_output_bytes2 = ((litlen_entry2 & 0xf00) >> 8) as usize;
-                //     let advance_output_bytes3 = ((litlen_entry3 & 0xf00) >> 8) as usize;
-                //     let advance_output_bytes4 = ((litlen_entry4 & 0xf00) >> 8) as usize;
-                //     self.consume_bits(
-                //         litlen_code_bits
-                //             + litlen_code_bits2
-                //             + litlen_code_bits3
-                //             + litlen_code_bits4,
-                //     );
-                //     litlen_entry = self.compression.litlen_table[(self.buffer & 0xfff) as usize];
-                //     self.fill_buffer(remaining_input);
-                //     output[output_index] = (litlen_entry >> 16) as u8;
-                //     output[output_index + 1] = (litlen_entry >> 24) as u8;
-                //     output_index += advance_output_bytes;
-                //     output[output_index] = (litlen_entry2 >> 16) as u8;
-                //     output[output_index + 1] = (litlen_entry2 >> 24) as u8;
-                //     output_index += advance_output_bytes2;
-                //     output[output_index] = (litlen_entry3 >> 16) as u8;
-                //     output[output_index + 1] = (litlen_entry3 >> 24) as u8;
-                //     output_index += advance_output_bytes3;
-                //     output[output_index] = (litlen_entry4 >> 16) as u8;
-                //     output[output_index + 1] = (litlen_entry4 >> 24) as u8;
-                //     output_index += advance_output_bytes4;
-                //     continue;
-                // }
 
-                // Fast path: the next symbol is <= 12 bits and a literal, the table specifies the
-                // output bytes and we can directly write them to the output buffer.
                 let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
-
-                // match advance_output_bytes {
-                //     1 => println!("[{output_index}] LIT1 {}", litlen_entry >> 16),
-                //     2 => println!(
-                //         "[{output_index}] LIT2 {} {} {}",
-                //         (litlen_entry >> 16) as u8,
-                //         litlen_entry >> 24,
-                //         bits & 0xfff
-                //     ),
-                //     n => println!(
-                //         "[{output_index}] LIT{n} {} {}",
-                //         (litlen_entry >> 16) as u8,
-                //         litlen_entry >> 24,
-                //     ),
-                // }
-
-                // let litlen_entry2 =
-                //     self.compression.litlen_table[(self.buffer >> litlen_code_bits & 0xfff) as usize];
-                // let litlen_code_bits2 = litlen_entry2 as u8;
-                // let litlen_entry3 = self.compression.litlen_table
-                //     [(bits >> (litlen_code_bits + litlen_code_bits2) & 0xfff) as usize];
-                // let litlen_code_bits3 = litlen_entry3 as u8;
-
                 output[output_index] = (litlen_entry >> 16) as u8;
                 output[output_index + 1] = (litlen_entry >> 24) as u8;
                 output_index += advance_output_bytes;
