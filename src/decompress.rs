@@ -181,12 +181,6 @@ impl Decompressor {
         }
     }
 
-    fn fill_buffer_unchecked(&mut self, input: &mut &[u8]) {
-        self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << self.nbits;
-        *input = &input[(63 - self.nbits as usize) / 8..];
-        self.nbits |= 56;
-    }
-
     fn peak_bits(&mut self, nbits: u8) -> u64 {
         debug_assert!(nbits <= 56 && nbits <= self.nbits);
         self.buffer & ((1u64 << nbits) - 1)
@@ -457,6 +451,8 @@ impl Decompressor {
             && output_index + 8 <= output.len()
             && remaining_input.len() >= 8
         {
+            // First check whether the next symbol is a literal. This code does up to 2 additional
+            // table lookups to decode more literals.
             let mut bits;
             let mut litlen_code_bits = litlen_entry as u8;
             if litlen_entry & LITERAL_ENTRY != 0 {
@@ -514,6 +510,7 @@ impl Decompressor {
                 bits = self.buffer;
             }
 
+            // The next symbol is either a 13+ bit literal, back-reference, or an EOF symbol.
             let (length_base, length_extra_bits, litlen_code_bits) =
                 if litlen_entry & EXCEPTIONAL_ENTRY == 0 {
                     (
@@ -530,8 +527,6 @@ impl Decompressor {
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 
                     if litlen_symbol < 256 {
-                        // println!("[{output_index}] LIT1b {} (val={:04x})", litlen_symbol, self.peak_bits(15));
-
                         self.consume_bits(litlen_code_bits);
                         litlen_entry =
                             self.compression.litlen_table[(self.buffer & 0xfff) as usize];
@@ -540,7 +535,6 @@ impl Decompressor {
                         output_index += 1;
                         continue;
                     } else if litlen_symbol == 256 {
-                        // println!("[{output_index}] EOF");
                         self.consume_bits(litlen_code_bits);
                         self.state = match self.last_block {
                             true => State::Checksum,
@@ -557,7 +551,6 @@ impl Decompressor {
                 } else if litlen_code_bits == 0 {
                     return Err(DecompressionError::InvalidLiteralLengthCode);
                 } else {
-                    // println!("[{output_index}] EOF");
                     self.consume_bits(litlen_code_bits);
                     self.state = match self.last_block {
                         true => State::Checksum,
@@ -578,11 +571,9 @@ impl Decompressor {
                     (dist_entry >> 8) as u8 & 0xf,
                     dist_entry as u8,
                 )
+            } else if dist_entry == 0 {
+                return Err(DecompressionError::InvalidDistanceCode);
             } else {
-                if dist_entry == 0 {
-                    return Err(DecompressionError::InvalidDistanceCode);
-                }
-
                 let secondary_table_index =
                     (dist_entry >> 16) + ((bits >> 9) as u32 & (dist_entry & 0xff));
                 let secondary_entry =
@@ -601,15 +592,13 @@ impl Decompressor {
             bits >>= dist_code_bits;
 
             let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1)) as usize;
-            let total_bits =
-                litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits;
-
             if dist > output_index {
                 return Err(DecompressionError::DistanceTooFarBack);
             }
 
-            // println!("[{output_index}] BACKREF len={} dist={} {:x}", length, dist, dist_entry);
-            self.consume_bits(total_bits);
+            self.consume_bits(
+                litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits,
+            );
             self.fill_buffer(remaining_input);
             litlen_entry = self.compression.litlen_table[(self.buffer & 0xfff) as usize];
 
@@ -653,6 +642,10 @@ impl Decompressor {
             output_index += copy_length;
         }
 
+        // Careful decoding loop.
+        //
+        // This loop processes the remaining input when we're too close to the end of the input or
+        // output to use the fast loop.
         while let State::CompressedData = self.state {
             self.fill_buffer(remaining_input);
             if output_index == output.len() {
@@ -667,21 +660,6 @@ impl Decompressor {
                 // Fast path: the next symbol is <= 12 bits and a literal, the table specifies the
                 // output bytes and we can directly write them to the output buffer.
                 let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
-
-                // match advance_output_bytes {
-                //     1 => println!("[{output_index}] LIT1 {}", litlen_entry >> 16),
-                //     2 => println!(
-                //         "[{output_index}] LIT2 {} {} {}",
-                //         (litlen_entry >> 16) as u8,
-                //         litlen_entry >> 24,
-                //         bits & 0xfff
-                //     ),
-                //     n => println!(
-                //         "[{output_index}] LIT{n} {} {}",
-                //         (litlen_entry >> 16) as u8,
-                //         litlen_entry >> 24,
-                //     ),
-                // }
 
                 if self.nbits < litlen_code_bits {
                     break;
@@ -725,14 +703,11 @@ impl Decompressor {
                     if self.nbits < litlen_code_bits {
                         break;
                     } else if litlen_symbol < 256 {
-                        // println!("[{output_index}] LIT1b {} (val={:04x})", litlen_symbol, self.peak_bits(15));
-
                         self.consume_bits(litlen_code_bits);
                         output[output_index] = litlen_symbol as u8;
                         output_index += 1;
                         continue;
                     } else if litlen_symbol == 256 {
-                        // println!("[{output_index}] EOF");
                         self.consume_bits(litlen_code_bits);
                         self.state = match self.last_block {
                             true => State::Checksum,
@@ -752,7 +727,6 @@ impl Decompressor {
                     if self.nbits < litlen_code_bits {
                         break;
                     }
-                    // println!("[{output_index}] EOF");
                     self.consume_bits(litlen_code_bits);
                     self.state = match self.last_block {
                         true => State::Checksum,
@@ -807,7 +781,6 @@ impl Decompressor {
                 return Err(DecompressionError::DistanceTooFarBack);
             }
 
-            // println!("[{output_index}] BACKREF len={} dist={} {:x}", length, dist, dist_entry);
             self.consume_bits(total_bits);
 
             let copy_length = length.min(output.len() - output_index);
