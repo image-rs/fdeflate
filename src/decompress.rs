@@ -3,8 +3,7 @@ use simd_adler32::Adler32;
 use crate::{
     huffman::{self, build_table},
     tables::{
-        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_CODE_LENGTHS,
-        LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES,
+        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FDEFLATE_DIST_DECODE_TABLE, FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES
     },
 };
 
@@ -76,15 +75,15 @@ struct CompressedBlock {
     eof_bits: u8,
 }
 
-// const FDEFLATE_COMPRESSED_BLOCK: CompressedBlock = CompressedBlock {
-//     litlen_table: FDEFLATE_LITLEN_DECODE_TABLE,
-//     secondary_table: Vec::new(),
-//     dist_table: FDEFLATE_DIST_DECODE_TABLE,
-//     dist_secondary_table: Vec::new(),
-//     eof_code: 0x8ff,
-//     eof_mask: 0xfff,
-//     eof_bits: 0xc,
-// };
+const FDEFLATE_COMPRESSED_BLOCK: CompressedBlock = CompressedBlock {
+    litlen_table: FDEFLATE_LITLEN_DECODE_TABLE,
+    secondary_table: Vec::new(),
+    dist_table: FDEFLATE_DIST_DECODE_TABLE,
+    dist_secondary_table: Vec::new(),
+    eof_code: 0x8ff,
+    eof_mask: 0xfff,
+    eof_bits: 0xc,
+};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum State {
@@ -220,7 +219,7 @@ impl Decompressor {
             0b01 => {
                 self.consume_bits(3);
                 // TODO: Do this statically rather than every time.
-                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression, 6)?;
+                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
                 self.state = State::CompressedData;
                 Ok(())
             }
@@ -359,19 +358,18 @@ impl Decompressor {
             self.header.code_lengths[i] = 0;
         }
 
-        // if self.header.hdist == 1
-        //     && self.header.code_lengths[..286] == tables::HUFFMAN_LENGTHS
-        //     && self.header.code_lengths[288] == 1
-        // {
-        //     self.compression = FDEFLATE_COMPRESSED_BLOCK;
-        // } else {
+        if self.header.hdist == 1
+            && self.header.code_lengths[..286] == tables::HUFFMAN_LENGTHS
+            && self.header.code_lengths[288] == 1
+        {
+            self.compression = FDEFLATE_COMPRESSED_BLOCK;
+        } else {
             Self::build_tables(
                 self.header.hlit,
                 &self.header.code_lengths,
                 &mut self.compression,
-                6,
             )?;
-        // }
+        }
         self.state = State::CompressedData;
         Ok(())
     }
@@ -380,7 +378,6 @@ impl Decompressor {
         hlit: usize,
         code_lengths: &[u8],
         compression: &mut CompressedBlock,
-        max_search_bits: u8,
     ) -> Result<(), DecompressionError> {
         // If there is no code assigned for the EOF symbol then the bitstream is invalid.
         if code_lengths[256] == 0 {
@@ -1004,29 +1001,29 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn fdeflate_table() {
-    //     let mut compression = CompressedBlock {
-    //         litlen_table: [0; 4096],
-    //         dist_table: [0; 512],
-    //         secondary_table: Vec::new(),
-    //         dist_secondary_table: Vec::new(),
-    //         eof_code: 0,
-    //         eof_mask: 0,
-    //         eof_bits: 0,
-    //     };
-    //     let mut lengths = tables::HUFFMAN_LENGTHS.to_vec();
-    //     lengths.resize(288, 0);
-    //     lengths.push(1);
-    //     lengths.resize(320, 0);
-    //     Decompressor::build_tables(286, &lengths, &mut compression, 11).unwrap();
+    #[test]
+    fn fdeflate_table() {
+        let mut compression = CompressedBlock {
+            litlen_table: [0; 4096],
+            dist_table: [0; 512],
+            secondary_table: Vec::new(),
+            dist_secondary_table: Vec::new(),
+            eof_code: 0,
+            eof_mask: 0,
+            eof_bits: 0,
+        };
+        let mut lengths = tables::HUFFMAN_LENGTHS.to_vec();
+        lengths.resize(288, 0);
+        lengths.push(1);
+        lengths.resize(320, 0);
+        Decompressor::build_tables(286, &lengths, &mut compression).unwrap();
 
-    //     assert_eq!(
-    //         compression, FDEFLATE_COMPRESSED_BLOCK,
-    //         "{:#x?}",
-    //         compression
-    //     );
-    // }
+        assert_eq!(
+            compression, FDEFLATE_COMPRESSED_BLOCK,
+            "{:#x?}",
+            compression
+        );
+    }
 
     #[test]
     fn it_works() {
