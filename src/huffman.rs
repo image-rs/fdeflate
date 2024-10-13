@@ -1,4 +1,4 @@
-use crate::decompress::{EXCEPTIONAL_ENTRY, SECONDARY_TABLE_ENTRY};
+use crate::decompress::{EXCEPTIONAL_ENTRY, LITERAL_ENTRY, SECONDARY_TABLE_ENTRY};
 
 /// Return the next code, or if the codeword is already all ones (which is the final code), return
 /// the same code again.
@@ -21,6 +21,7 @@ pub fn build_table(
     primary_table: &mut [u32],
     secondary_table: &mut Vec<u16>,
     is_distance_table: bool,
+    double_literal: bool,
 ) -> bool {
     // Count the number of symbols with each code length.
     let mut histogram = [0; 16];
@@ -73,11 +74,12 @@ pub fn build_table(
     }
 
     // Sort the symbols by code length.
+    let mut next_index = offsets;
     let mut sorted_symbols = [0; 288];
     for symbol in 0..lengths.len() {
         let length = lengths[symbol];
-        sorted_symbols[offsets[length as usize]] = symbol;
-        offsets[length as usize] += 1;
+        sorted_symbols[next_index[length as usize]] = symbol;
+        next_index[length as usize] += 1;
     }
 
     let mut codeword = 0u16;
@@ -102,6 +104,25 @@ pub fn build_table(
 
             codes[symbol] = codeword;
             codeword = next_codeword(codeword, current_table_end as u16);
+        }
+
+        if double_literal {
+            for len1 in 1..(length - 1) {
+                let len2 = length - len1;
+                for sym1_index in offsets[len1]..next_index[len1] {
+                    for sym2_index in offsets[len2]..next_index[len2] {
+                        let sym1 = sorted_symbols[sym1_index];
+                        let sym2 = sorted_symbols[sym2_index];
+                        if sym1 < 256 && sym2 < 256 {
+                            let codeword1 = codes[sym1];
+                            let codeword2 = codes[sym2];
+                            let codeword = codeword1 | (codeword2 << len1);
+                            let entry = (sym1 as u32) << 16 | (sym2 as u32) << 24 | LITERAL_ENTRY | (2 << 8);
+                            primary_table[codeword as usize] = entry | (length as u32);
+                        }
+                    }
+                }
+            }
         }
 
         // If we aren't at the maximum table size, double the size of the table.

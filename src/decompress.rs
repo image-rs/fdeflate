@@ -277,6 +277,7 @@ impl Decompressor {
             &mut self.header.table,
             &mut Vec::new(),
             false,
+            false,
         ) {
             return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
@@ -396,6 +397,7 @@ impl Decompressor {
             &mut compression.litlen_table,
             &mut compression.secondary_table,
             false,
+            true,
         ) {
             return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
@@ -416,6 +418,7 @@ impl Decompressor {
                 &mut compression.dist_table,
                 &mut compression.dist_secondary_table,
                 true,
+                false,
             ) {
                 return Err(DecompressionError::BadDistanceHuffmanTree);
             }
