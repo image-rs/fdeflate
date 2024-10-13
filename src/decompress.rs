@@ -408,6 +408,7 @@ impl Decompressor {
         // Build the distance code table.
         let lengths = &code_lengths[288..320];
         if lengths == [0; 32] {
+            compression.dist_table.fill(0);
         } else {
             let mut dist_codes = [0; 32];
             if !huffman::build_table(
@@ -602,7 +603,7 @@ impl Decompressor {
                     dist_entry as u8,
                 )
             } else if self.nbits > litlen_code_bits + length_extra_bits + 9 {
-                if dist_entry == 0 {
+                if dist_entry >> 8 == 0 {
                     return Err(DecompressionError::InvalidDistanceCode);
                 }
 
