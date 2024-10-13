@@ -442,7 +442,7 @@ impl Decompressor {
         self.fill_buffer(remaining_input);
         let mut litlen_entry = self.compression.litlen_table[(self.buffer & 0xfff) as usize];
         while self.state == State::CompressedData
-            && output_index + 4 < output.len()
+            && output_index + 8 < output.len()
             && remaining_input.len() >= 8
         {
             debug_assert!(self.nbits >= 48);
@@ -518,19 +518,19 @@ impl Decompressor {
                 // let litlen_code_bits3 = litlen_entry3 as u8;
 
                 output[output_index] = (litlen_entry >> 16) as u8;
-                // output[output_index + 1] = (litlen_entry >> 24) as u8;
+                output[output_index + 1] = (litlen_entry >> 24) as u8;
                 output_index += advance_output_bytes;
 
                 if litlen_entry2 & LITERAL_ENTRY != 0 {
                     let advance_output_bytes2 = ((litlen_entry2 & 0xf00) >> 8) as usize;
                     output[output_index] = (litlen_entry2 >> 16) as u8;
-                    // output[output_index + 1] = (litlen_entry2 >> 24) as u8;
+                    output[output_index + 1] = (litlen_entry2 >> 24) as u8;
                     output_index += advance_output_bytes2;
 
                     if litlen_entry3 & LITERAL_ENTRY != 0 {
                         let advance_output_bytes3 = ((litlen_entry3 & 0xf00) >> 8) as usize;
                         output[output_index] = (litlen_entry3 >> 16) as u8;
-                        // output[output_index + 1] = (litlen_entry3 >> 24) as u8;
+                        output[output_index + 1] = (litlen_entry3 >> 24) as u8;
                         output_index += advance_output_bytes3;
 
                         litlen_entry = litlen_entry4;
