@@ -555,8 +555,6 @@ impl Decompressor {
                     } else if litlen_symbol < 256 {
                         // println!("[{output_index}] LIT1b {} (val={:04x})", litlen_symbol, self.peak_bits(15));
 
-                        // innumerable::event!("literal", litlen_code_bits);
-
                         self.consume_bits(litlen_code_bits);
                         output[output_index] = litlen_symbol as u8;
                         output_index += 1;
@@ -596,8 +594,6 @@ impl Decompressor {
             let length = length_base as usize + (bits & length_extra_mask) as usize;
             bits >>= length_extra_bits;
 
-            // innumerable::event!("length", litlen_code_bits + length_extra_bits);
-
             let dist_entry = self.compression.dist_table[(bits & 0x1ff) as usize];
             let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry & LITERAL_ENTRY != 0 {
                 (
@@ -628,8 +624,6 @@ impl Decompressor {
                 break;
             };
             bits >>= dist_code_bits;
-
-            // innumerable::event!("distance", dist_code_bits + dist_extra_bits);
 
             let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1)) as usize;
             let total_bits =
