@@ -524,28 +524,30 @@ impl Decompressor {
                     let litlen_symbol = secondary_entry >> 4;
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 
-                    if litlen_symbol < 256 {
-                        self.consume_bits(litlen_code_bits);
-                        litlen_entry =
-                            self.compression.litlen_table[(self.buffer & 0xfff) as usize];
-                        self.fill_buffer(remaining_input);
-                        output[output_index] = litlen_symbol as u8;
-                        output_index += 1;
-                        continue;
-                    } else if litlen_symbol == 256 {
-                        self.consume_bits(litlen_code_bits);
-                        self.state = match self.last_block {
-                            true => State::Checksum,
-                            false => State::BlockHeader,
-                        };
-                        break;
+                    match litlen_symbol {
+                        0..256 => {
+                            self.consume_bits(litlen_code_bits);
+                            litlen_entry =
+                                self.compression.litlen_table[(self.buffer & 0xfff) as usize];
+                            self.fill_buffer(remaining_input);
+                            output[output_index] = litlen_symbol as u8;
+                            output_index += 1;
+                            continue;
+                        }
+                        256 => {
+                            self.consume_bits(litlen_code_bits);
+                            self.state = match self.last_block {
+                                true => State::Checksum,
+                                false => State::BlockHeader,
+                            };
+                            break;
+                        }
+                        _ => (
+                            LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
+                            LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257],
+                            litlen_code_bits,
+                        ),
                     }
-
-                    (
-                        LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
-                        LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257],
-                        litlen_code_bits,
-                    )
                 } else if litlen_code_bits == 0 {
                     return Err(DecompressionError::InvalidLiteralLengthCode);
                 } else {
