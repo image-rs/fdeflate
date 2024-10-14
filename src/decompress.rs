@@ -525,7 +525,7 @@ impl Decompressor {
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 
                     match litlen_symbol {
-                        0..256 => {
+                        0..=255 => {
                             self.consume_bits(litlen_code_bits);
                             litlen_entry =
                                 self.compression.litlen_table[(self.buffer & 0xfff) as usize];
