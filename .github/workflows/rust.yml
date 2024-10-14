@@ -5,8 +5,6 @@ on:
     branches: [ main, next ]
   pull_request:
     branches: [ main, next ]
-  schedule:
-    - cron: '5 16 * * 6'
 
 jobs:
   build:
@@ -14,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rust: ["1.57.0", stable, beta, nightly]
+        rust: ["1.67.0", stable, beta, nightly]
     steps:
     - uses: actions/checkout@v2
     - uses: dtolnay/rust-toolchain@v1

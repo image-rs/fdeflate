@@ -4,7 +4,7 @@ version = "0.3.5"
 edition = "2021"
 
 # note: when changed, also update test runner in `.github/workflows/rust.yml`
-rust-version = "1.57.0"
+rust-version = "1.67.0"
 
 license = "MIT OR Apache-2.0"
 description = "Fast specialized deflate implementation"
