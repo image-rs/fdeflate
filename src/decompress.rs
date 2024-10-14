@@ -401,7 +401,7 @@ impl Decompressor {
             return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
 
-        compression.eof_code = codes[256] as u16;
+        compression.eof_code = codes[256];
         compression.eof_mask = (1 << code_lengths[256]) - 1;
         compression.eof_bits = code_lengths[256];
 

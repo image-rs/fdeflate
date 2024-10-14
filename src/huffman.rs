@@ -14,6 +14,7 @@ fn next_codeword(mut codeword: u16, table_size: u16) -> u16 {
     codeword
 }
 
+#[allow(clippy::needless_range_loop)]
 pub fn build_table(
     lengths: &[u8],
     entries: &[u32],
