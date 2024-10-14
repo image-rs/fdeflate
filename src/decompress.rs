@@ -569,7 +569,7 @@ impl Decompressor {
                     (dist_entry >> 8) as u8 & 0xf,
                     dist_entry as u8,
                 )
-            } else if dist_entry == 0 {
+            } else if dist_entry >> 8 == 0 {
                 return Err(DecompressionError::InvalidDistanceCode);
             } else {
                 let secondary_table_index =
