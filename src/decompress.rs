@@ -492,9 +492,7 @@ impl Decompressor {
                         self.consume_bits(litlen_code_bits + litlen_code_bits2);
                         litlen_entry = litlen_entry3;
                         litlen_code_bits = litlen_code_bits3;
-                        if self.nbits < 48 {
-                            self.fill_buffer(remaining_input);
-                        }
+                        self.fill_buffer(remaining_input);
                         bits = self.buffer;
                     }
                 } else {
