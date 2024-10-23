@@ -9,7 +9,7 @@ rust-version = "1.67.0"
 license = "MIT OR Apache-2.0"
 description = "Fast specialized deflate implementation"
 authors = ["The image-rs Developers"]
-include = ["/src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+include = ["/src", "/tests", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 # crates.io metadata
 documentation = "https://docs.rs/fdeflate"
