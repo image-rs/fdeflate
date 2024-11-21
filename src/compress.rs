@@ -175,7 +175,8 @@ const CACHE3_SIZE: usize = 1 << 14;
 const CACHE4_SIZE: usize = 1 << 16;
 const WINDOW_SIZE: usize = 32768;
 
-const NICE_LENGTH: u16 = 30;
+const SEARCH_DEPTH: u16 = 100;
+const NICE_LENGTH: u16 = 60;
 
 struct CacheTable {
     hash3_table: Box<[u32; CACHE3_SIZE]>,
@@ -201,15 +202,15 @@ impl CacheTable {
         let mut best_offset = 0;
         let mut best_length = min_match - 1;
 
-        if min_match == 3 {
-            // let hash3_offset = self.hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
-            // if hash3_offset >= index.saturating_sub(8192).max(1) {
-            //     best_length = match_length(data, index, hash3_offset);
-            //     best_offset = hash3_offset as u32;
-            // }
-        }
+        // if min_match == 3 {
+        //     let hash3_offset = self.hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
+        //     if hash3_offset >= index.saturating_sub(8192).max(1) {
+        //         best_length = match_length(data, index, hash3_offset);
+        //         best_offset = hash3_offset as u32;
+        //     }
+        // }
 
-        let mut n = 100;
+        let mut n = SEARCH_DEPTH;
         let mut offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
         loop {
             if offset < min_offset {
@@ -243,7 +244,7 @@ impl CacheTable {
     }
 
     fn insert(&mut self, hash3: u32, hash4: u32, offset: usize) {
-        // self.hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset;
+        // self.hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
 
         let prev_offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE];
         self.hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
@@ -344,7 +345,7 @@ impl<W: Write> Compressor<W> {
         while i < data.len() {
             let mut symbols = Vec::new();
 
-            let block_end = data.len().min(i + 128 * 1024);
+            // let block_end = data.len().min(i + 64 * 1024);
 
             for len in &mut lengths {
                 if *len == 0 {
@@ -358,7 +359,7 @@ impl<W: Write> Compressor<W> {
             }
 
             let mut last_match = i;
-            'outer: while i < block_end && i + 4 <= data.len() {
+            'outer: while symbols.len() < 16384 && i + 4 <= data.len() {
                 let current = u32::from_le_bytes(data[i..][..4].try_into().unwrap());
 
                 let hash3 = compute_hash3(current);
@@ -368,94 +369,94 @@ impl<W: Write> Compressor<W> {
 
                 if length >= 3 {
                     'peak_ahead: loop {
-                        if length < 128 && i + length as usize + 4 <= data.len() {
+                        if length < NICE_LENGTH && i + length as usize + 4 <= data.len() {
                             let next = u32::from_le_bytes(data[i + 1..][..4].try_into().unwrap());
                             let next_hash4 = compute_hash4(next);
                             let (next_index, next_length) =
                                 matches.get(&data, i + 1, 0, next_hash4, length + 1);
 
-                            if next_length > length {
-                                let next2 =
-                                    u32::from_le_bytes(data[i + 2..][..4].try_into().unwrap());
-                                let next2_hash4 = compute_hash4(next);
-                                let (next2_index, next2_length) =
-                                    matches.get(&data, i + 2, 0, next2_hash4, length + 1);
+                            if next_length > length || (next_length == length && next_index * 4 < index) {
+                                // let next2 =
+                                //     u32::from_le_bytes(data[i + 2..][..4].try_into().unwrap());
+                                // let next2_hash4 = compute_hash4(next);
+                                // let (next2_index, next2_length) =
+                                //     matches.get(&data, i + 2, 0, next2_hash4, length + 1);
 
-                                if next2_length > next_length {
-                                    let next3 =
-                                        u32::from_le_bytes(data[i + 3..][..4].try_into().unwrap());
-                                    let next3_hash4 = compute_hash4(next);
-                                    let (next3_index, next3_length) =
-                                        matches.get(&data, i + 3, 0, next3_hash4, length + 1);
+                                // if next2_length > next_length {
+                                //     let next3 =
+                                //         u32::from_le_bytes(data[i + 3..][..4].try_into().unwrap());
+                                //     let next3_hash4 = compute_hash4(next);
+                                //     let (next3_index, next3_length) =
+                                //         matches.get(&data, i + 3, 0, next3_hash4, length + 1);
 
-                                    if next3_length > next2_length {
-                                        let next4 = u32::from_le_bytes(
-                                            data[i + 4..][..4].try_into().unwrap(),
-                                        );
-                                        let next4_hash4 = compute_hash4(next);
-                                        let (next4_index, next4_length) =
-                                            matches.get(&data, i + 4, 0, next4_hash4, length + 1);
+                                //     if next3_length > next2_length {
+                                //         let next4 = u32::from_le_bytes(
+                                //             data[i + 4..][..4].try_into().unwrap(),
+                                //         );
+                                //         let next4_hash4 = compute_hash4(next);
+                                //         let (next4_index, next4_length) =
+                                //             matches.get(&data, i + 4, 0, next4_hash4, length + 1);
 
-                                        if next4_length > next3_length {
-                                            let dist = (i - index as usize) as u16;
-                                            symbols.push(Symbol::Backref {
-                                                length: 4,
-                                                distance: dist,
-                                                dist_sym: distance_to_dist_sym(dist),
-                                            });
+                                //         if next4_length > next3_length {
+                                //             let dist = (i - index as usize) as u16;
+                                //             symbols.push(Symbol::Backref {
+                                //                 length: 4,
+                                //                 distance: dist,
+                                //                 dist_sym: distance_to_dist_sym(dist),
+                                //             });
 
-                                            matches.insert(compute_hash3(next), next_hash4, i);
-                                            matches.insert(
-                                                compute_hash3(next2),
-                                                next2_hash4,
-                                                i + 1,
-                                            );
-                                            matches.insert(
-                                                compute_hash3(next3),
-                                                next3_hash4,
-                                                i + 2,
-                                            );
-                                            matches.insert(
-                                                compute_hash3(next4),
-                                                next4_hash4,
-                                                i + 3,
-                                            );
+                                //             matches.insert(compute_hash3(next), next_hash4, i);
+                                //             matches.insert(
+                                //                 compute_hash3(next2),
+                                //                 next2_hash4,
+                                //                 i + 1,
+                                //             );
+                                //             matches.insert(
+                                //                 compute_hash3(next3),
+                                //                 next3_hash4,
+                                //                 i + 2,
+                                //             );
+                                //             matches.insert(
+                                //                 compute_hash3(next4),
+                                //                 next4_hash4,
+                                //                 i + 3,
+                                //             );
 
-                                            i += 3;
-                                            last_match = i;
-                                            index = next4_index;
-                                            length = next4_length;
-                                            continue 'peak_ahead;
-                                        } else {
-                                            symbols.push(Symbol::Literal(data[i]));
-                                            symbols.push(Symbol::Literal(data[i + 1]));
-                                            symbols.push(Symbol::Literal(data[i + 2]));
-                                            matches.insert(compute_hash3(next), next_hash4, i);
-                                            matches.insert(compute_hash3(next2), next2_hash4, i + 1);
-                                            matches.insert(compute_hash3(next3), next3_hash4, i + 2);
+                                //             i += 3;
+                                //             last_match = i;
+                                //             index = next4_index;
+                                //             length = next4_length;
+                                //             continue 'peak_ahead;
+                                //         } else {
+                                //             symbols.push(Symbol::Literal(data[i]));
+                                //             symbols.push(Symbol::Literal(data[i + 1]));
+                                //             symbols.push(Symbol::Literal(data[i + 2]));
+                                //             matches.insert(compute_hash3(next), next_hash4, i);
+                                //             matches.insert(compute_hash3(next2), next2_hash4, i + 1);
+                                //             matches.insert(compute_hash3(next3), next3_hash4, i + 2);
 
-                                            i += 3;
-                                            index = next3_index;
-                                            length = next3_length;
-                                        }
-                                    } else {
-                                        symbols.push(Symbol::Literal(data[i]));
-                                        symbols.push(Symbol::Literal(data[i + 1]));
-                                        matches.insert(compute_hash3(next), next_hash4, i);
-                                        matches.insert(compute_hash3(next2), next2_hash4, i + 1);
+                                //             i += 3;
+                                //             index = next3_index;
+                                //             length = next3_length;
+                                //         }
+                                //     } else {
+                                //         symbols.push(Symbol::Literal(data[i]));
+                                //         symbols.push(Symbol::Literal(data[i + 1]));
+                                //         matches.insert(compute_hash3(next), next_hash4, i);
+                                //         matches.insert(compute_hash3(next2), next2_hash4, i + 1);
 
-                                        i += 2;
-                                        index = next2_index;
-                                        length = next2_length;
-                                    }
-                                } else {
-                                    symbols.push(Symbol::Literal(data[i]));
-                                    matches.insert(compute_hash3(next), next_hash4, i);
+                                //         i += 2;
+                                //         index = next2_index;
+                                //         length = next2_length;
+                                //     }
+                                // } else {
+                                symbols.push(Symbol::Literal(data[i]));
+                                matches.insert(compute_hash3(next), next_hash4, i);
 
-                                    i += 1;
-                                    index = next_index;
-                                    length = next_length;
-                                }
+                                i += 1;
+                                index = next_index;
+                                length = next_length;
+                                // }
                             }
                         }
 
@@ -488,10 +489,12 @@ impl<W: Write> Compressor<W> {
                 symbols.push(Symbol::Literal(data[i]));
                 i += 1;
             }
-            for i in i..block_end {
-                symbols.push(Symbol::Literal(data[i]));
+            if data.len() - i < 4 {
+                for j in i..data.len() {
+                    symbols.push(Symbol::Literal(data[j]));
+                }
+                i = data.len();
             }
-            i = i.max(block_end);
 
             let mut frequencies = [0u32; 286];
             let mut dist_frequencies = [0u32; 30];
