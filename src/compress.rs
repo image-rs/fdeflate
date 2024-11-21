@@ -171,12 +171,13 @@ fn match_length(data: &[u8], index: usize, prev_index: usize) -> u16 {
     length as u16
 }
 
-const CACHE3_SIZE: usize = 1 << 14;
-const CACHE4_SIZE: usize = 1 << 16;
+const CACHE3_SIZE: usize = 1 << 18;
+const CACHE4_SIZE: usize = 1 << 18;
 const WINDOW_SIZE: usize = 32768;
 
 const SEARCH_DEPTH: u16 = 100;
-const NICE_LENGTH: u16 = 60;
+const NICE_LENGTH: u16 = 258;
+const MAX_LAZY: u16 = 258;
 
 struct CacheTable {
     hash3_table: Box<[u32; CACHE3_SIZE]>,
@@ -202,13 +203,13 @@ impl CacheTable {
         let mut best_offset = 0;
         let mut best_length = min_match - 1;
 
-        // if min_match == 3 {
-        //     let hash3_offset = self.hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
-        //     if hash3_offset >= index.saturating_sub(8192).max(1) {
-        //         best_length = match_length(data, index, hash3_offset);
-        //         best_offset = hash3_offset as u32;
-        //     }
-        // }
+        if min_match == 3 {
+            let hash3_offset = self.hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
+            if hash3_offset >= index.saturating_sub(8192).max(1) {
+                best_length = match_length(data, index, hash3_offset);
+                best_offset = hash3_offset as u32;
+            }
+        }
 
         let mut n = SEARCH_DEPTH;
         let mut offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
@@ -244,7 +245,7 @@ impl CacheTable {
     }
 
     fn insert(&mut self, hash3: u32, hash4: u32, offset: usize) {
-        // self.hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
+        self.hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
 
         let prev_offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE];
         self.hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
@@ -338,25 +339,8 @@ impl<W: Write> Compressor<W> {
         let mut matches = CacheTable::new();
         let mut i = 0;
 
-        let mut lengths = HUFFMAN_LENGTHS;
-        let mut dist_lengths = [5u8; 30];
-        //dist_lengths[0] = 1;
-
         while i < data.len() {
             let mut symbols = Vec::new();
-
-            // let block_end = data.len().min(i + 64 * 1024);
-
-            for len in &mut lengths {
-                if *len == 0 {
-                    *len = 15;
-                }
-            }
-            for len in &mut dist_lengths {
-                if *len == 0 {
-                    *len = 5;
-                }
-            }
 
             let mut last_match = i;
             'outer: while symbols.len() < 16384 && i + 4 <= data.len() {
@@ -369,7 +353,7 @@ impl<W: Write> Compressor<W> {
 
                 if length >= 3 {
                     'peak_ahead: loop {
-                        if length < NICE_LENGTH && i + length as usize + 4 <= data.len() {
+                        if length <= MAX_LAZY && i + length as usize + 4 <= data.len() {
                             let next = u32::from_le_bytes(data[i + 1..][..4].try_into().unwrap());
                             let next_hash4 = compute_hash4(next);
                             let (next_index, next_length) =
@@ -451,7 +435,7 @@ impl<W: Write> Compressor<W> {
                                 //     }
                                 // } else {
                                 symbols.push(Symbol::Literal(data[i]));
-                                matches.insert(compute_hash3(next), next_hash4, i);
+                                matches.insert(compute_hash3(next), next_hash4, i + 1);
 
                                 i += 1;
                                 index = next_index;
@@ -512,9 +496,11 @@ impl<W: Write> Compressor<W> {
                 }
             }
 
+            let mut lengths = [0u8; 286];
             let mut codes = [0u16; 286];
             build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
 
+            let mut dist_lengths = [0u8; 30];
             let mut dist_codes = [0u16; 30];
             build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
 
