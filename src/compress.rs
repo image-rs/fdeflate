@@ -193,7 +193,7 @@ impl CacheTable {
         }
     }
 
-    fn get(&self, data: &[u8], index: usize, hash3: u32, hash4: u32, min_match: u16) -> (u32, u16) {
+    fn get(&self, data: &[u8], index: usize, value: u32, min_match: u16) -> (u32, u16) {
         // if index + min_match as usize >= data.len() {
         //     return (0, 0);
         // }
@@ -204,12 +204,15 @@ impl CacheTable {
         let mut best_length = min_match - 1;
 
         if min_match == 3 {
+            let hash3 = compute_hash3(value);
             let hash3_offset = self.hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
             if hash3_offset >= index.saturating_sub(8192).max(1) {
                 best_length = match_length(data, index, hash3_offset);
                 best_offset = hash3_offset as u32;
             }
         }
+
+        let hash4 = compute_hash4(value);
 
         let mut n = SEARCH_DEPTH;
         let mut offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
@@ -244,7 +247,10 @@ impl CacheTable {
         (0, 0)
     }
 
-    fn insert(&mut self, hash3: u32, hash4: u32, offset: usize) {
+    fn insert(&mut self, value: u32, offset: usize) {
+        let hash3 = compute_hash3(value);
+        let hash4 = compute_hash4(value);
+
         self.hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
 
         let prev_offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE];
@@ -346,18 +352,15 @@ impl<W: Write> Compressor<W> {
             'outer: while symbols.len() < 16384 && i + 4 <= data.len() {
                 let current = u32::from_le_bytes(data[i..][..4].try_into().unwrap());
 
-                let hash3 = compute_hash3(current);
-                let hash4 = compute_hash4(current);
-                let (mut index, mut length) = matches.get(&data, i, hash3, hash4, 3);
-                matches.insert(hash3, hash4, i);
+                let (mut index, mut length) = matches.get(&data, i, current, 3);
+                matches.insert(current, i);
 
                 if length >= 3 {
                     'peak_ahead: loop {
                         if length <= MAX_LAZY && i + length as usize + 4 <= data.len() {
                             let next = u32::from_le_bytes(data[i + 1..][..4].try_into().unwrap());
-                            let next_hash4 = compute_hash4(next);
                             let (next_index, next_length) =
-                                matches.get(&data, i + 1, 0, next_hash4, length + 1);
+                                matches.get(&data, i + 1, next, length + 1);
 
                             if next_length > length || (next_length == length && next_index * 4 < index) {
                                 // let next2 =
@@ -435,7 +438,7 @@ impl<W: Write> Compressor<W> {
                                 //     }
                                 // } else {
                                 symbols.push(Symbol::Literal(data[i]));
-                                matches.insert(compute_hash3(next), next_hash4, i + 1);
+                                matches.insert(next, i + 1);
 
                                 i += 1;
                                 index = next_index;
@@ -453,7 +456,7 @@ impl<W: Write> Compressor<W> {
 
                         for j in (i + 1)..(i + length as usize).min(data.len() - 4) {
                             let v = u32::from_le_bytes(data[j..][..4].try_into().unwrap());
-                            matches.insert(compute_hash3(v), compute_hash4(v), j);
+                            matches.insert(v, j);
                         }
 
                         i += length as usize;
