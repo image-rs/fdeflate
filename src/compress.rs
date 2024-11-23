@@ -152,10 +152,13 @@ fn distance_to_dist_sym(distance: u16) -> u8 {
 }
 
 fn compute_hash3(v: u32) -> u32 {
-    (0x330698ecu64.wrapping_mul(((v & 0xff_ffff) ^ 0x2722_0a95) as u64) >> 32) as u32
+    (0x330698ecu64.wrapping_mul(((v & 0xff_ffff) ^ 0x2722_0a95) as u64) >> 16) as u32
 }
 fn compute_hash4(v: u32) -> u32 {
-    (0x27220a95u64.wrapping_mul((v ^ 0x3306_98ec) as u64) >> 32) as u32
+    let mut hasher = fnv::FnvHasher::default();
+    std::hash::Hasher::write_u32(&mut hasher, v);
+    std::hash::Hasher::finish(&hasher) as u32
+    // (0x27220a95u64.wrapping_mul((v ^ 0x3306_98ec) as u64) >> 16) as u32
 }
 
 fn match_length(data: &[u8], index: usize, prev_index: usize) -> u16 {
@@ -171,13 +174,13 @@ fn match_length(data: &[u8], index: usize, prev_index: usize) -> u16 {
     length as u16
 }
 
-const CACHE3_SIZE: usize = 1 << 18;
+const CACHE3_SIZE: usize = 1 << 16;
 const CACHE4_SIZE: usize = 1 << 18;
 const WINDOW_SIZE: usize = 32768;
 
-const SEARCH_DEPTH: u16 = 100;
+const SEARCH_DEPTH: u16 = 200;
 const NICE_LENGTH: u16 = 258;
-const MAX_LAZY: u16 = 258;
+const MAX_LAZY: u16 = 130;
 
 struct CacheTable {
     hash3_table: Box<[u32; CACHE3_SIZE]>,
@@ -215,6 +218,13 @@ impl CacheTable {
         let hash4 = compute_hash4(value);
 
         let mut n = SEARCH_DEPTH;
+        if min_match > 3 {
+            n /= 2;
+        }
+        if value == 0 {
+            n = 4;
+        }
+
         let mut offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
         loop {
             if offset < min_offset {
