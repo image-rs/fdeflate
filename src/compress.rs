@@ -183,7 +183,7 @@ const CACHE4_SIZE: usize = 1 << 1;
 const CACHE5_SIZE: usize = 1 << 18;
 const WINDOW_SIZE: usize = 32768;
 
-const SEARCH_DEPTH: u16 = 30;
+const SEARCH_DEPTH: u16 = 200;
 const NICE_LENGTH: u16 = 130;
 const MAX_LAZY: u16 = 16;
 
@@ -205,7 +205,7 @@ impl CacheTable {
 
     fn get(&self, data: &[u8], index: usize, value: u64, min_match: u16) -> (u32, u16) {
         // if index + min_match as usize >= data.len() {
-        //     return (0, 0);
+        //    return (0, 0);
         // }
 
         let min_offset = index.saturating_sub(32768).max(1);
@@ -384,69 +384,100 @@ impl<W: Write> Compressor<W> {
             'outer: while symbols.len() < 16384 && i + 8 <= data.len() {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
 
+                if current == 0 {
+                    if i == 0 || data[i - 1] != 0 {
+                        symbols.push(Symbol::Literal(0));
+                        i += 1;
+                    }
+
+                    let mut run_length = 0;
+                    while i < data.len() && data[i] == 0 && run_length < 258 {
+                        run_length += 1;
+                        i += 1;
+                    }
+
+                    symbols.push(Symbol::Backref {
+                        length: run_length as u16,
+                        distance: 1,
+                        dist_sym: 0,
+                    });
+
+                    last_match = i;
+                    continue 'outer;
+                }
+
                 let (mut index, mut length) = matches.get(&data, i, current, 3);
                 matches.insert(current, i);
 
                 if length >= 3 {
-                    'peak_ahead: loop {
-                        if length <= MAX_LAZY && i + length as usize + 8 <= data.len() {
-                            let next = u64::from_le_bytes(data[i + 1..][..8].try_into().unwrap());
-                            let (next_index, next_length) =
-                                matches.get(&data, i + 1, next, length /*+ 1*/);
+                    // if length <= MAX_LAZY && i + length as usize + 8 <= data.len() {
+                    //     let next = u64::from_le_bytes(data[i + 1..][..8].try_into().unwrap());
+                    //     let (next_index, next_length) =
+                    //         matches.get(&data, i + 1, next, length /*+ 1*/);
 
-                            if next_length > length
-                                || (next_length == length && next_index * 4 < index)
-                            {
-                                symbols.push(Symbol::Literal(data[i]));
-                                matches.insert(next, i + 1);
+                    //     if next_length > length
+                    //         || (next_length == length && next_index * 4 < index)
+                    //     {
+                    //         symbols.push(Symbol::Literal(data[i]));
+                    //         matches.insert(next, i + 1);
 
-                                i += 1;
-                                index = next_index;
-                                length = next_length;
-                            } else {
-                                let next =
-                                    u64::from_le_bytes(data[i + 2..][..8].try_into().unwrap());
-                                let (next_index, next_length) =
-                                    matches.get(&data, i + 2, next, length + 1);
+                    //         i += 1;
+                    //         index = next_index;
+                    //         length = next_length;
+                    //     } else {
+                    //         let next =
+                    //             u64::from_le_bytes(data[i + 2..][..8].try_into().unwrap());
+                    //         let (next_index, next_length) =
+                    //             matches.get(&data, i + 2, next, length + 1);
 
-                                if next_length > length {
-                                    symbols.push(Symbol::Literal(data[i]));
-                                    matches.insert(next, i + 1);
-                                    symbols.push(Symbol::Literal(data[i + 1]));
-                                    matches.insert(next, i + 2);
+                    //         if next_length > length {
+                    //             symbols.push(Symbol::Literal(data[i]));
+                    //             matches.insert(next, i + 1);
+                    //             symbols.push(Symbol::Literal(data[i + 1]));
+                    //             matches.insert(next, i + 2);
 
-                                    i += 2;
-                                    index = next_index;
-                                    length = next_length;
-                                }
-                            }
-                        }
+                    //             i += 2;
+                    //             index = next_index;
+                    //             length = next_length;
+                    //         }
+                    //     }
+                    // }
 
-                        let dist = (i - index as usize) as u16;
-                        symbols.push(Symbol::Backref {
-                            length: length as u16,
-                            distance: dist,
-                            dist_sym: distance_to_dist_sym(dist),
-                        });
+                    let dist = (i - index as usize) as u16;
+                    symbols.push(Symbol::Backref {
+                        length: length as u16,
+                        distance: dist,
+                        dist_sym: distance_to_dist_sym(dist),
+                    });
 
-                        let insert_start = (i + 1) + length.saturating_sub(16) as usize;
-                        for j in insert_start..(i + length as usize).min(data.len() - 8) {
-                            let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                            matches.insert(v, j);
-                        }
-
-                        i += length as usize;
-                        last_match = i;
-                        continue 'outer;
+                    let insert_start = (i + 1);// + length.saturating_sub(16) as usize;
+                    for j in insert_start..(i + length as usize).min(data.len() - 8) {
+                        let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                        matches.insert(v, j);
                     }
+
+                    i += length as usize;
+                    last_match = i;
+                    continue 'outer;
+                // } else if current as u32 == 0 {
+                //     let run_length = current.trailing_zeros() / 8;
+                //     symbols.push(Symbol::Literal(0));
+                //     symbols.push(Symbol::Backref {
+                //         length: (run_length - 1) as u16,
+                //         distance: 1,
+                //         dist_sym: 0,
+                //     });
+                //     i += run_length as usize;
+                //     last_match = i;
+                //     continue 'outer;
                 }
 
-                // // If we haven't found a match in a while, start skipping ahead by emitting multiple
-                // // literals at once.
-                // for _ in 0..((i - last_match) >> 9).min((data.len() - i).saturating_sub(1)) {
-                //     symbols.push(Symbol::Literal(data[i]));
-                //     i += 1;
-                // }
+                // If we haven't found a match in a while, start skipping ahead by emitting multiple
+                // literals at once.
+                for _ in 0..((i - last_match) >> 9).min((data.len() - i).saturating_sub(1)) {
+                    symbols.push(Symbol::Literal(data[i]));
+                    i += 1;
+                }
 
                 // Emit a literal
                 symbols.push(Symbol::Literal(data[i]));
