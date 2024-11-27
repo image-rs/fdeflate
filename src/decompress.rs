@@ -103,6 +103,7 @@ pub struct Decompressor {
     queued_rle: Option<(u8, usize)>,
     queued_backref: Option<(usize, usize)>,
     last_block: bool,
+    static_table: bool,
 
     state: State,
     checksum: Adler32,
@@ -145,6 +146,7 @@ impl Decompressor {
             state: State::ZlibHeader,
             last_block: false,
             ignore_adler32: false,
+            static_table: false,
         }
     }
 
@@ -209,8 +211,10 @@ impl Decompressor {
             }
             0b01 => {
                 self.consume_bits(3);
-                // TODO: Do this statically rather than every time.
-                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
+                if !self.static_table {
+                    self.static_table = true;
+                    Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
+                }
                 self.state = State::CompressedData;
                 Ok(())
             }
@@ -231,6 +235,7 @@ impl Decompressor {
 
                 self.consume_bits(17);
                 self.state = State::CodeLengthCodes;
+                self.static_table = false;
                 Ok(())
             }
             0b11 => Err(DecompressionError::InvalidBlockType),
