@@ -213,7 +213,7 @@ impl Decompressor {
                 self.consume_bits(3);
 
                 // Check for an entirely empty blocks which can happen if there are "partial
-                // flushes" in the deflate stream). With fixed huffman codes, the EOF symbol is
+                // flushes" in the deflate stream. With fixed huffman codes, the EOF symbol is
                 // 7-bits of zeros so we peak ahead and see if the next 7-bits are all zero.
                 if self.peak_bits(7) == 0 {
                     self.consume_bits(7);
