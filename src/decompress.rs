@@ -103,6 +103,7 @@ pub struct Decompressor {
     queued_rle: Option<(u8, usize)>,
     queued_backref: Option<(usize, usize)>,
     last_block: bool,
+    fixed_table: bool,
 
     state: State,
     checksum: Adler32,
@@ -145,6 +146,7 @@ impl Decompressor {
             state: State::ZlibHeader,
             last_block: false,
             ignore_adler32: false,
+            fixed_table: false,
         }
     }
 
@@ -182,7 +184,7 @@ impl Decompressor {
 
     fn read_block_header(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
         self.fill_buffer(remaining_input);
-        if self.nbits < 3 {
+        if self.nbits < 10 {
             return Ok(());
         }
 
@@ -209,8 +211,35 @@ impl Decompressor {
             }
             0b01 => {
                 self.consume_bits(3);
-                // TODO: Do this statically rather than every time.
-                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
+
+                // Check for an entirely empty blocks which can happen if there are "partial
+                // flushes" in the deflate stream. With fixed huffman codes, the EOF symbol is
+                // 7-bits of zeros so we peak ahead and see if the next 7-bits are all zero.
+                if self.peak_bits(7) == 0 {
+                    self.consume_bits(7);
+                    if self.last_block {
+                        self.state = State::Checksum;
+                        return Ok(());
+                    }
+
+                    // At this point we've consumed the entire block and need to read the next block
+                    // header. If tail call optimization were guaranteed, we could just recurse
+                    // here. But without it, a long sequence of empty fixed-blocks might cause a
+                    // stack overflow. Instead, we consume all empty blocks in a loop and then
+                    // recurse. This is the only recursive call this function, and thus is safe.
+                    while self.nbits >= 10 && self.peak_bits(10) == 0b010 {
+                        self.consume_bits(10);
+                        self.fill_buffer(remaining_input);
+                    }
+                    return self.read_block_header(remaining_input);
+                }
+
+                // Build decoding tables if the previous block wasn't also a fixed block.
+                if !self.fixed_table {
+                    self.fixed_table = true;
+                    Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
+                }
+
                 self.state = State::CompressedData;
                 Ok(())
             }
@@ -231,6 +260,7 @@ impl Decompressor {
 
                 self.consume_bits(17);
                 self.state = State::CodeLengthCodes;
+                self.fixed_table = false;
                 Ok(())
             }
             0b11 => Err(DecompressionError::InvalidBlockType),
