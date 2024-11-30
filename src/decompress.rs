@@ -3,8 +3,9 @@ use simd_adler32::Adler32;
 use crate::{
     huffman::{self, build_table},
     tables::{
-        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_CODE_LENGTHS,
-        LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES,
+        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA,
+        FIXED_DIST_TABLE, FIXED_LITLEN_TABLE, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
+        LITLEN_TABLE_ENTRIES,
     },
 };
 
@@ -237,7 +238,12 @@ impl Decompressor {
                 // Build decoding tables if the previous block wasn't also a fixed block.
                 if !self.fixed_table {
                     self.fixed_table = true;
-                    Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
+                    for chunk in self.compression.litlen_table.chunks_exact_mut(512) {
+                        chunk.copy_from_slice(&FIXED_LITLEN_TABLE);
+                    }
+                    for chunk in self.compression.dist_table.chunks_exact_mut(32) {
+                        chunk.copy_from_slice(&FIXED_DIST_TABLE);
+                    }
                 }
 
                 self.state = State::CompressedData;
@@ -1155,6 +1161,23 @@ mod tests {
     }
 
     #[test]
+    fn fixed_tables() {
+        let mut compression = CompressedBlock {
+            litlen_table: [0; 4096],
+            dist_table: [0; 512],
+            secondary_table: Vec::new(),
+            dist_secondary_table: Vec::new(),
+            eof_code: 0,
+            eof_mask: 0,
+            eof_bits: 0,
+        };
+        Decompressor::build_tables(288, &FIXED_CODE_LENGTHS, &mut compression).unwrap();
+
+        assert_eq!(compression.litlen_table[..512], FIXED_LITLEN_TABLE);
+        assert_eq!(compression.dist_table[..32], FIXED_DIST_TABLE);
+    }
+
+    #[test]
     fn it_works() {
         roundtrip(b"Hello world!");
     }
@@ -1259,6 +1282,7 @@ mod tests {
     }
 
     mod test_utils;
+    use tables::FIXED_CODE_LENGTHS;
     use test_utils::{decompress_by_chunks, TestDecompressionError};
 
     fn verify_no_sensitivity_to_input_chunking(
