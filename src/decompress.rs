@@ -63,13 +63,12 @@ pub const EXCEPTIONAL_ENTRY: u32 = 0x4000;
 pub const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
 
 /// The Decompressor state for a compressed block.
-#[repr(align(64))]
 #[derive(Eq, PartialEq, Debug)]
 struct CompressedBlock {
-    litlen_table: [u32; 4096],
+    litlen_table: Box<[u32; 4096]>,
     secondary_table: Vec<u16>,
 
-    dist_table: [u32; 512],
+    dist_table: Box<[u32; 512]>,
     dist_secondary_table: Vec<u16>,
 
     eof_code: u16,
@@ -124,8 +123,8 @@ impl Decompressor {
             buffer: 0,
             nbits: 0,
             compression: CompressedBlock {
-                litlen_table: [0; 4096],
-                dist_table: [0; 512],
+                litlen_table: Box::new([0; 4096]),
+                dist_table: Box::new([0; 512]),
                 secondary_table: Vec::new(),
                 dist_secondary_table: Vec::new(),
                 eof_code: 0,
@@ -411,7 +410,7 @@ impl Decompressor {
             &code_lengths[..hlit],
             &LITLEN_TABLE_ENTRIES,
             &mut codes[..hlit],
-            &mut compression.litlen_table,
+            &mut *compression.litlen_table,
             &mut compression.secondary_table,
             false,
             true,
@@ -433,7 +432,7 @@ impl Decompressor {
                 lengths,
                 &tables::DISTANCE_TABLE_ENTRIES,
                 &mut dist_codes,
-                &mut compression.dist_table,
+                &mut *compression.dist_table,
                 &mut compression.dist_secondary_table,
                 true,
                 false,
