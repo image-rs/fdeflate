@@ -3,8 +3,8 @@ use simd_adler32::Adler32;
 use crate::{
     huffman::{self, build_table},
     tables::{
-        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_CODE_LENGTHS,
-        LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES,
+        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_DIST_TABLE,
+        FIXED_LITLEN_TABLE, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES,
     },
 };
 
@@ -62,13 +62,12 @@ pub const EXCEPTIONAL_ENTRY: u32 = 0x4000;
 pub const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
 
 /// The Decompressor state for a compressed block.
-#[repr(align(64))]
 #[derive(Eq, PartialEq, Debug)]
 struct CompressedBlock {
-    litlen_table: [u32; 4096],
+    litlen_table: Box<[u32; 4096]>,
     secondary_table: Vec<u16>,
 
-    dist_table: [u32; 512],
+    dist_table: Box<[u32; 512]>,
     dist_secondary_table: Vec<u16>,
 
     eof_code: u16,
@@ -123,8 +122,8 @@ impl Decompressor {
             buffer: 0,
             nbits: 0,
             compression: CompressedBlock {
-                litlen_table: [0; 4096],
-                dist_table: [0; 512],
+                litlen_table: Box::new([0; 4096]),
+                dist_table: Box::new([0; 512]),
                 secondary_table: Vec::new(),
                 dist_secondary_table: Vec::new(),
                 eof_code: 0,
@@ -237,7 +236,12 @@ impl Decompressor {
                 // Build decoding tables if the previous block wasn't also a fixed block.
                 if !self.fixed_table {
                     self.fixed_table = true;
-                    Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression)?;
+                    for chunk in self.compression.litlen_table.chunks_exact_mut(512) {
+                        chunk.copy_from_slice(&FIXED_LITLEN_TABLE);
+                    }
+                    for chunk in self.compression.dist_table.chunks_exact_mut(32) {
+                        chunk.copy_from_slice(&FIXED_DIST_TABLE);
+                    }
                 }
 
                 self.state = State::CompressedData;
@@ -405,7 +409,7 @@ impl Decompressor {
             &code_lengths[..hlit],
             &LITLEN_TABLE_ENTRIES,
             &mut codes[..hlit],
-            &mut compression.litlen_table,
+            &mut *compression.litlen_table,
             &mut compression.secondary_table,
             false,
             true,
@@ -427,7 +431,7 @@ impl Decompressor {
                 lengths,
                 &tables::DISTANCE_TABLE_ENTRIES,
                 &mut dist_codes,
-                &mut compression.dist_table,
+                &mut *compression.dist_table,
                 &mut compression.dist_secondary_table,
                 true,
                 false,
@@ -1155,6 +1159,23 @@ mod tests {
     }
 
     #[test]
+    fn fixed_tables() {
+        let mut compression = CompressedBlock {
+            litlen_table: Box::new([0; 4096]),
+            dist_table: Box::new([0; 512]),
+            secondary_table: Vec::new(),
+            dist_secondary_table: Vec::new(),
+            eof_code: 0,
+            eof_mask: 0,
+            eof_bits: 0,
+        };
+        Decompressor::build_tables(288, &FIXED_CODE_LENGTHS, &mut compression).unwrap();
+
+        assert_eq!(compression.litlen_table[..512], FIXED_LITLEN_TABLE);
+        assert_eq!(compression.dist_table[..32], FIXED_DIST_TABLE);
+    }
+
+    #[test]
     fn it_works() {
         roundtrip(b"Hello world!");
     }
@@ -1259,6 +1280,7 @@ mod tests {
     }
 
     mod test_utils;
+    use tables::FIXED_CODE_LENGTHS;
     use test_utils::{decompress_by_chunks, TestDecompressionError};
 
     fn verify_no_sensitivity_to_input_chunking(
