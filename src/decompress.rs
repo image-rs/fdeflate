@@ -3,9 +3,8 @@ use simd_adler32::Adler32;
 use crate::{
     huffman::{self, build_table},
     tables::{
-        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA,
-        FIXED_DIST_TABLE, FIXED_LITLEN_TABLE, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
-        LITLEN_TABLE_ENTRIES,
+        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_DIST_TABLE,
+        FIXED_LITLEN_TABLE, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES,
     },
 };
 
@@ -1162,8 +1161,8 @@ mod tests {
     #[test]
     fn fixed_tables() {
         let mut compression = CompressedBlock {
-            litlen_table: [0; 4096],
-            dist_table: [0; 512],
+            litlen_table: Box::new([0; 4096]),
+            dist_table: Box::new([0; 512]),
             secondary_table: Vec::new(),
             dist_secondary_table: Vec::new(),
             eof_code: 0,
