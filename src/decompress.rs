@@ -242,6 +242,9 @@ impl Decompressor {
                     for chunk in self.compression.dist_table.chunks_exact_mut(32) {
                         chunk.copy_from_slice(&FIXED_DIST_TABLE);
                     }
+                    self.compression.eof_bits = 7;
+                    self.compression.eof_code = 0;
+                    self.compression.eof_mask = 0x7f;
                 }
 
                 self.state = State::CompressedData;
