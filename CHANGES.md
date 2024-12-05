@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.7
+
+ - Optimized decoding of streams that use fixed huffman blocks ([#38], [#39])
+
+[#38]: https://github.com/image-rs/fdeflate/pull/38
+[#39]: https://github.com/image-rs/fdeflate/pull/39
+
 ## 0.3.6
 
 This release improves end-to-end decoding peformance for PNG images by 10% on average,
