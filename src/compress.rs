@@ -220,7 +220,7 @@ impl CacheTable {
         ip: usize,
         value: u64,
         min_match: u16,
-    ) -> (u32, u16, usize) {
+    ) -> (u16, u16, usize) {
         let min_offset = ip.saturating_sub(32768).max(1);
 
         let mut best_offset = 0;
@@ -297,7 +297,11 @@ impl CacheTable {
         }
 
         if best_length >= min_match {
-            return (best_offset as u32, best_length as u16, best_ip);
+            return (
+                best_length as u16,
+                (ip - best_offset as usize) as u16,
+                best_ip,
+            );
         }
 
         (0, 0, ip)
@@ -446,31 +450,26 @@ impl<W: Write> Compressor<W> {
                     continue 'outer;
                 }
 
-                let (mut index, mut length, mut match_start) =
+                let (mut length, mut distance, mut match_start) =
                     matches.get_and_insert(&data, last_match, ip, current, 3);
                 if length >= 3 {
                     if match_start == ip
                         && length < self.max_lazy
                         && ip + length as usize + 9 <= data.len()
                     {
-                        let (next_index, next_length, next_match_start) = matches.get_and_insert(
-                            &data,
-                            last_match,
-                            ip + 1,
-                            current >> 8,
-                            length + 1,
-                        );
+                        ip += 1;
+                        let (next_length, next_distance, next_match_start) =
+                            matches.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
                         if next_length > 0 {
-                            if next_match_start <= ip && next_index < ip as u32 {
-                                index = next_index - 1;
+                            if next_match_start < ip && distance > 1 {
+                                distance = next_distance;
                                 length = next_length;
                                 match_start = next_match_start;
-                            } else if next_match_start > ip
+                            } else if next_match_start >= ip
                             /* && (next_length > length || (next_length == length && next_index * 4 < index)) */
                             {
-                                ip += 1;
-                                index = next_index;
                                 length = next_length;
+                                distance = next_distance;
                                 match_start = next_match_start;
                             }
                         }
@@ -481,11 +480,10 @@ impl<W: Write> Compressor<W> {
                         symbols.push(Symbol::Literal(data[j]));
                     }
 
-                    let dist = (ip - index as usize) as u16;
                     symbols.push(Symbol::Backref {
                         length: length as u16,
-                        distance: dist,
-                        dist_sym: distance_to_dist_sym(dist),
+                        distance,
+                        dist_sym: distance_to_dist_sym(distance),
                     });
 
                     let match_end = match_start + length as usize;
