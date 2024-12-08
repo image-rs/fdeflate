@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::tables::{
-    BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, HUFFMAN_LENGTHS,
-    LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
+    BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_LEN_EXTRA,
+    LENGTH_TO_SYMBOL,
 };
 
 fn build_huffman_tree(
@@ -722,8 +722,6 @@ pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use crate::decompress;
-
     use super::*;
     use rand::Rng;
 
