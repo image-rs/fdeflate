@@ -1,4 +1,3 @@
-use core::hash;
 use simd_adler32::Adler32;
 use std::{
     collections::BinaryHeap,
@@ -204,13 +203,13 @@ struct CacheTable {
 impl CacheTable {
     fn new() -> Self {
         Self {
-            hash3_table: None,//Some(vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
-            hash4_table: None,//Some(vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
+            hash3_table: Some(vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
+            hash4_table: Some(vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
             hash_table: vec![0; CACHE5_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
-            search_depth: 8,
-            nice_length: 16,
-            hash_mask: 0xffff_ffff_ffff,
+            search_depth: 256,
+            nice_length: 130,
+            hash_mask: 0xff_ffff_ffff,
         }
     }
 
@@ -372,8 +371,8 @@ impl<W: Write> Compressor<W> {
             writer,
             pending: Vec::new(),
 
-            skip_ahead_shift: 3,
-            max_lazy: 0,
+            skip_ahead_shift: 9,
+            max_lazy: 16,
         };
         compressor.write_headers()?;
         Ok(compressor)
@@ -450,9 +449,8 @@ impl<W: Write> Compressor<W> {
                 let (mut index, mut length, mut match_start) =
                     matches.get_and_insert(&data, last_match, ip, current, 3);
                 if length >= 3 {
-                    let match_end = match_start + length as usize;
-                    if length < self.max_lazy
-                        && match_end > ip + 1
+                    if match_start == ip
+                        && length < self.max_lazy
                         && ip + length as usize + 9 <= data.len()
                     {
                         let (next_index, next_length, next_match_start) = matches.get_and_insert(
@@ -462,16 +460,14 @@ impl<W: Write> Compressor<W> {
                             current >> 8,
                             length + 1,
                         );
-
                         if next_length > 0 {
-                            if next_match_start <= ip {
+                            if next_match_start <= ip && next_index < ip as u32 {
                                 index = next_index - 1;
                                 length = next_length;
                                 match_start = next_match_start;
-                            } else
-                            /*if (next_length > length || (next_length == length && next_index * 4 < index))*/
+                            } else if next_match_start > ip
+                            /* && (next_length > length || (next_length == length && next_index * 4 < index)) */
                             {
-                                symbols.push(Symbol::Literal(data[ip]));
                                 ip += 1;
                                 index = next_index;
                                 length = next_length;
@@ -492,6 +488,7 @@ impl<W: Write> Compressor<W> {
                         dist_sym: distance_to_dist_sym(dist),
                     });
 
+                    let match_end = match_start + length as usize;
                     let insert_end = (match_end - 2).min(data.len() - 8);
                     let insert_start = (ip + 1).max(insert_end.saturating_sub(16));
                     for j in (insert_start..insert_end).step_by(3) {
