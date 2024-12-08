@@ -1,3 +1,4 @@
+use core::hash;
 use simd_adler32::Adler32;
 use std::{
     collections::BinaryHeap,
@@ -159,9 +160,9 @@ fn compute_hash4(v: u64) -> u32 {
     std::hash::Hasher::write_u32(&mut hasher, v as u32);
     std::hash::Hasher::finish(&hasher) as u32
 }
-fn compute_hash5(v: u64) -> u32 {
+fn compute_hash(v: u64) -> u32 {
     let mut hasher = fnv::FnvHasher::default();
-    std::hash::Hasher::write_u64(&mut hasher, v & 0xff_ffff_ffff);
+    std::hash::Hasher::write_u64(&mut hasher, v);
     std::hash::Hasher::finish(&hasher) as u32
 }
 
@@ -185,103 +186,116 @@ fn match_length(data: &[u8], anchor: usize, mut ip: usize, mut prev_index: usize
     (length as u16, ip)
 }
 
-const CACHE3_SIZE: usize = 1 << 1;
-const CACHE4_SIZE: usize = 1 << 1;
+const CACHE3_SIZE: usize = 1 << 15;
+const CACHE4_SIZE: usize = 1 << 15;
 const CACHE5_SIZE: usize = 1 << 18;
 const WINDOW_SIZE: usize = 32768;
 
-const SEARCH_DEPTH: u16 = 8;
-const NICE_LENGTH: u16 = 8;
-const MAX_LAZY: u16 = 16;
-
 struct CacheTable {
-    hash3_table: Box<[u32; CACHE3_SIZE]>,
-    hash4_table: Box<[u32; CACHE4_SIZE]>,
-    hash5_table: Box<[u32; CACHE5_SIZE]>,
+    hash3_table: Option<Box<[u32; CACHE3_SIZE]>>,
+    hash4_table: Option<Box<[u32; CACHE4_SIZE]>>,
+    hash_table: Box<[u32; CACHE5_SIZE]>,
     links: Box<[u32; WINDOW_SIZE]>,
+
+    search_depth: u16,
+    nice_length: u16,
+    hash_mask: u64,
 }
 impl CacheTable {
     fn new() -> Self {
         Self {
-            hash3_table: vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap(),
-            hash4_table: vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap(),
-            hash5_table: vec![0; CACHE5_SIZE].into_boxed_slice().try_into().unwrap(),
+            hash3_table: None,//Some(vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
+            hash4_table: None,//Some(vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
+            hash_table: vec![0; CACHE5_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
+            search_depth: 8,
+            nice_length: 16,
+            hash_mask: 0xffff_ffff_ffff,
         }
     }
 
-    fn get(
-        &self,
+    fn get_and_insert(
+        &mut self,
         data: &[u8],
         anchor: usize,
         ip: usize,
         value: u64,
         min_match: u16,
     ) -> (u32, u16, usize) {
-        // if index + min_match as usize >= data.len() {
-        //    return (0, 0);
-        // }
-
         let min_offset = ip.saturating_sub(32768).max(1);
 
         let mut best_offset = 0;
         let mut best_length = min_match - 1;
         let mut best_ip = 0;
 
-        let hash5 = compute_hash5(value);
-
-        let mut n = SEARCH_DEPTH;
+        let mut n = self.search_depth;
         if min_match > 3 {
             n /= 2;
         }
 
-        let mut offset = self.hash5_table[(hash5 as usize) % CACHE5_SIZE] as usize;
+        let hash = compute_hash(value & self.hash_mask);
+        let hash_index = (hash as usize) % CACHE5_SIZE;
+        let mut offset = self.hash_table[hash_index] as usize;
+
+        // Insert current value
+        self.hash_table[hash_index] = ip as u32;
+        self.links[ip % WINDOW_SIZE] = offset as u32;
+
+        // Visit previous matches
         loop {
             if offset < min_offset {
                 break;
             }
 
-            // if data[ip + best_length as usize] == data[offset + best_length as usize] {
             let (length, start) = match_length(data, anchor, ip, offset);
             if length > best_length {
                 best_length = length;
                 best_offset = offset as u32;
                 best_ip = start;
             }
-            if length >= NICE_LENGTH || ip + length as usize == data.len() {
+            if length >= self.nice_length || ip + length as usize == data.len() {
                 break;
             }
-            // }
 
             n -= 1;
             if n == 0 {
-                // if value != 0 {
-                //     innumerable::event!("length", best_length.min(16));
-                // }
                 break;
             }
 
             offset = self.links[offset % WINDOW_SIZE] as usize;
         }
 
-        // if best_length < 4 {
-        //     let hash4 = compute_hash4(value);
-        //     let hash4_offset = self.hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
-        //     if hash4_offset >= min_offset
-        //     /*index.saturating_sub(8192).max(1) */
-        //     {
-        //         best_length = match_length(data, index, hash4_offset);
-        //         best_offset = hash4_offset as u32;
-        //     }
-        // }
-        // if best_length < 3 {
-        //     let hash3 = compute_hash3(value as u32);
-        //     let hash3_offset = self.hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
-        //     if hash3_offset >= index.saturating_sub(64).max(1) {
-        //         best_length = match_length(data, index, hash3_offset);
-        //         best_offset = hash3_offset as u32;
-        //     }
-        // }
+        if let Some(hash4_table) = &mut self.hash4_table {
+            let hash4 = compute_hash4(value);
+            if best_length < 4 {
+                let hash4_offset = hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
+                if hash4_offset >= ip.saturating_sub(8192).max(1) {
+                    let (length, start) = match_length(data, anchor, ip, hash4_offset);
+                    if length >= 4 {
+                        best_length = length;
+                        best_offset = hash4_offset as u32;
+                        best_ip = start;
+                    }
+                }
+            }
+            hash4_table[(hash4 as usize) % CACHE4_SIZE] = ip as u32;
+
+            if let Some(hash3_table) = &mut self.hash3_table {
+                let hash3 = compute_hash3(value as u32);
+                if best_length < min_match && min_match <= 3 {
+                    let hash3_offset = hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
+                    if hash3_offset >= ip.saturating_sub(64).max(1) {
+                        let (length, start) = match_length(data, anchor, ip, hash3_offset);
+                        if length >= 3 {
+                            best_length = length;
+                            best_offset = hash3_offset as u32;
+                            best_ip = start;
+                        }
+                    }
+                }
+                hash3_table[(hash3 as usize) % CACHE3_SIZE] = ip as u32;
+            }
+        }
 
         if best_length >= min_match {
             return (best_offset as u32, best_length as u16, best_ip);
@@ -291,15 +305,19 @@ impl CacheTable {
     }
 
     fn insert(&mut self, value: u64, offset: usize) {
-        // let hash3 = compute_hash3(value as u32);
-        // let hash4 = compute_hash4(value);
-        let hash5 = compute_hash5(value);
+        if let Some(hash4_table) = &mut self.hash4_table {
+            let hash4 = compute_hash4(value);
+            hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
 
-        // self.hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
-        // self.hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
+            if let Some(hash3_table) = &mut self.hash3_table {
+                let hash3 = compute_hash3(value as u32);
+                hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
+            }
+        }
 
-        let prev_offset = self.hash5_table[(hash5 as usize) % CACHE5_SIZE];
-        self.hash5_table[(hash5 as usize) % CACHE5_SIZE] = offset as u32;
+        let hash = compute_hash(value & self.hash_mask);
+        let prev_offset = self.hash_table[(hash as usize) % CACHE5_SIZE];
+        self.hash_table[(hash as usize) % CACHE5_SIZE] = offset as u32;
         self.links[offset as usize % WINDOW_SIZE] = prev_offset;
     }
 }
@@ -311,6 +329,9 @@ pub struct Compressor<W: Write> {
     nbits: u8,
     writer: W,
     pending: Vec<u8>,
+
+    skip_ahead_shift: u8,
+    max_lazy: u16,
 }
 impl<W: Write> Compressor<W> {
     fn write_bits(&mut self, bits: u64, nbits: u8) -> io::Result<()> {
@@ -350,6 +371,9 @@ impl<W: Write> Compressor<W> {
             nbits: 0,
             writer,
             pending: Vec::new(),
+
+            skip_ahead_shift: 3,
+            max_lazy: 0,
         };
         compressor.write_headers()?;
         Ok(compressor)
@@ -423,49 +447,38 @@ impl<W: Write> Compressor<W> {
                     continue 'outer;
                 }
 
-                let (mut index, mut length, match_start) =
-                    matches.get(&data, last_match, ip, current, 3);
-                matches.insert(current, ip);
+                let (mut index, mut length, mut match_start) =
+                    matches.get_and_insert(&data, last_match, ip, current, 3);
                 if length >= 3 {
-                    // if length <= MAX_LAZY && i + length as usize + 8 <= data.len() {
-                    //     let next = u64::from_le_bytes(data[i + 1..][..8].try_into().unwrap());
-                    //     let (next_index, next_length) =
-                    //         matches.get(&data, i + 1, next, length /*+ 1*/);
+                    let match_end = match_start + length as usize;
+                    if length < self.max_lazy
+                        && match_end > ip + 1
+                        && ip + length as usize + 9 <= data.len()
+                    {
+                        let (next_index, next_length, next_match_start) = matches.get_and_insert(
+                            &data,
+                            last_match,
+                            ip + 1,
+                            current >> 8,
+                            length + 1,
+                        );
 
-                    //     if next_length > length
-                    //         || (next_length == length && next_index * 4 < index)
-                    //     {
-                    //         symbols.push(Symbol::Literal(data[i]));
-                    //         matches.insert(next, i + 1);
-
-                    //         i += 1;
-                    //         index = next_index;
-                    //         length = next_length;
-                    //     } else {
-                    //         let next =
-                    //             u64::from_le_bytes(data[i + 2..][..8].try_into().unwrap());
-                    //         let (next_index, next_length) =
-                    //             matches.get(&data, i + 2, next, length + 1);
-
-                    //         if next_length > length {
-                    //             symbols.push(Symbol::Literal(data[i]));
-                    //             matches.insert(next, i + 1);
-                    //             symbols.push(Symbol::Literal(data[i + 1]));
-                    //             matches.insert(next, i + 2);
-
-                    //             i += 2;
-                    //             index = next_index;
-                    //             length = next_length;
-                    //         }
-                    //     }
-                    // }
-
-                    // while length < 258 && ip > last_match && index > 0 && data[ip-1] == data[index as usize-1] {
-                    //     length += 1;
-                    //     ip -= 1;
-                    //     index -= 1;
-                    // }
-
+                        if next_length > 0 {
+                            if next_match_start <= ip {
+                                index = next_index - 1;
+                                length = next_length;
+                                match_start = next_match_start;
+                            } else
+                            /*if (next_length > length || (next_length == length && next_index * 4 < index))*/
+                            {
+                                symbols.push(Symbol::Literal(data[ip]));
+                                ip += 1;
+                                index = next_index;
+                                length = next_length;
+                                match_start = next_match_start;
+                            }
+                        }
+                    }
                     assert!(last_match <= match_start);
 
                     for j in last_match..match_start {
@@ -479,21 +492,33 @@ impl<W: Write> Compressor<W> {
                         dist_sym: distance_to_dist_sym(dist),
                     });
 
-                    // let insert_end = (match_start + length as usize).min(data.len() - 8);
-                    // let insert_start = (ip + 1).max(insert_end.saturating_sub(16));
-                    // for j in insert_start..insert_end {
-                    //     let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                    //     matches.insert(v, j);
+                    let insert_end = (match_end - 2).min(data.len() - 8);
+                    let insert_start = (ip + 1).max(insert_end.saturating_sub(16));
+                    for j in (insert_start..insert_end).step_by(3) {
+                        let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                        matches.insert(v, j);
+                        matches.insert(v >> 8, j + 1);
+                        matches.insert(v >> 16, j + 2);
+                    }
+
+                    // if insert_end >= insert_start + 3 {
+                    //     let v = u64::from_le_bytes(data[insert_end - 3..][..8].try_into().unwrap());
+                    //     matches.insert(v, insert_end - 3);
+                    //     matches.insert(v >> 8, insert_end - 2);
+                    //     matches.insert(v >> 16, insert_end - 1);
                     // }
 
-                    ip = match_start + length as usize;
+                    ip = match_end;
                     last_match = ip;
                     continue 'outer;
                 }
 
+                // matches.insert(current >> 8, ip + 1);
+                // matches.insert(current >> 16, ip + 2);
+
                 // If we haven't found a match in a while, start skipping ahead by emitting multiple
                 // literals at once.
-                ip += 1 + ((ip - last_match) >> 9);
+                ip += 1 + ((ip - last_match) >> self.skip_ahead_shift);
             }
             if data.len() < ip + 8 {
                 for j in last_match..data.len() {
