@@ -201,15 +201,18 @@ struct CacheTable {
     hash_mask: u64,
 }
 impl CacheTable {
-    fn new() -> Self {
+    fn new(search_depth: u16, nice_length: u16, min_match: u8) -> Self {
+        assert!((3..=6).contains(&min_match));
+
         Self {
-            hash3_table: Some(vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
-            hash4_table: Some(vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
+            hash3_table: (min_match == 3)
+                .then(|| vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
+            hash4_table: None, //Some(vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
             hash_table: vec![0; CACHE5_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
-            search_depth: 256,
-            nice_length: 130,
-            hash_mask: 0xff_ffff_ffff,
+            search_depth,
+            nice_length,
+            hash_mask: (1 << (min_match.max(4) * 8)) - 1,
         }
     }
 
@@ -333,7 +336,10 @@ pub struct Compressor<W: Write> {
     writer: W,
     pending: Vec<u8>,
 
+    min_match: u8,
     skip_ahead_shift: u8,
+    search_depth: u16,
+    nice_length: u16,
     max_lazy: u16,
 }
 impl<W: Write> Compressor<W> {
@@ -375,8 +381,11 @@ impl<W: Write> Compressor<W> {
             writer,
             pending: Vec::new(),
 
-            skip_ahead_shift: 9,
-            max_lazy: 16,
+            min_match: 4,
+            search_depth: 1500,
+            nice_length: 258,
+            skip_ahead_shift: 29,
+            max_lazy: 64,
         };
         compressor.write_headers()?;
         Ok(compressor)
@@ -414,7 +423,7 @@ impl<W: Write> Compressor<W> {
             },
         }
 
-        let mut matches = CacheTable::new();
+        let mut matches = CacheTable::new(self.search_depth, self.nice_length, self.min_match);
         let mut ip = 0;
 
         while ip < data.len() {
