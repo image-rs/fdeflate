@@ -281,22 +281,22 @@ impl CacheTable {
                 }
             }
             hash4_table[(hash4 as usize) % CACHE4_SIZE] = ip as u32;
+        }
 
-            if let Some(hash3_table) = &mut self.hash3_table {
-                let hash3 = compute_hash3(value as u32);
-                if best_length < min_match && min_match <= 3 {
-                    let hash3_offset = hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
-                    if hash3_offset >= ip.saturating_sub(64).max(1) {
-                        let (length, start) = match_length(data, anchor, ip, hash3_offset);
-                        if length >= 3 {
-                            best_length = length;
-                            best_offset = hash3_offset as u32;
-                            best_ip = start;
-                        }
+        if let Some(hash3_table) = &mut self.hash3_table {
+            let hash3 = compute_hash3(value as u32);
+            if best_length < min_match && min_match <= 3 {
+                let hash3_offset = hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
+                if hash3_offset >= ip.saturating_sub(64).max(1) {
+                    let (length, start) = match_length(data, anchor, ip, hash3_offset);
+                    if length >= 3 {
+                        best_length = length;
+                        best_offset = hash3_offset as u32;
+                        best_ip = start;
                     }
                 }
-                hash3_table[(hash3 as usize) % CACHE3_SIZE] = ip as u32;
             }
+            hash3_table[(hash3 as usize) % CACHE3_SIZE] = ip as u32;
         }
 
         if best_length >= min_match {
@@ -314,11 +314,11 @@ impl CacheTable {
         if let Some(hash4_table) = &mut self.hash4_table {
             let hash4 = compute_hash4(value);
             hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
+        }
 
-            if let Some(hash3_table) = &mut self.hash3_table {
-                let hash3 = compute_hash3(value as u32);
-                hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
-            }
+        if let Some(hash3_table) = &mut self.hash3_table {
+            let hash3 = compute_hash3(value as u32);
+            hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
         }
 
         let hash = compute_hash(value & self.hash_mask);
@@ -381,7 +381,7 @@ impl<W: Write> Compressor<W> {
             writer,
             pending: Vec::new(),
 
-            min_match: 4,
+            min_match: 3,
             search_depth: 1500,
             nice_length: 258,
             skip_ahead_shift: 29,
