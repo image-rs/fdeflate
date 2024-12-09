@@ -426,6 +426,10 @@ impl<W: Write> Compressor<W> {
         let mut matches = CacheTable::new(self.search_depth, self.nice_length, self.min_match);
         let mut ip = 0;
 
+        let mut length = 0;
+        let mut distance = 0;
+        let mut match_start = 0;
+
         while ip < data.len() {
             let mut symbols = Vec::new();
 
@@ -456,11 +460,18 @@ impl<W: Write> Compressor<W> {
                     });
 
                     last_match = ip;
-                    continue 'outer;
+
+                    length = 0;
+                    distance = 0;
+                    match_start = 0;
+                    continue;
                 }
 
-                let (mut length, mut distance, mut match_start) =
-                    matches.get_and_insert(&data, last_match, ip, current, 3);
+                if length == 0 {
+                    (length, distance, match_start) =
+                        matches.get_and_insert(&data, last_match, ip, current, 3);
+                }
+
                 if length >= 3 {
                     if match_start == ip
                         && length < self.max_lazy
@@ -468,18 +479,19 @@ impl<W: Write> Compressor<W> {
                     {
                         ip += 1;
                         let (next_length, next_distance, next_match_start) =
-                            matches.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
+                            matches.get_and_insert(&data, last_match, ip, current >> 8, length);
                         if next_length > 0 {
                             if next_match_start < ip && distance > 1 {
                                 distance = next_distance;
                                 length = next_length;
                                 match_start = next_match_start;
-                            } else if next_match_start >= ip
+                            } else if next_length > length && next_match_start >= ip
                             /* && (next_length > length || (next_length == length && next_index * 4 < index)) */
                             {
                                 length = next_length;
                                 distance = next_distance;
                                 match_start = next_match_start;
+                                continue;
                             }
                         }
                     }
@@ -514,6 +526,10 @@ impl<W: Write> Compressor<W> {
 
                     ip = match_end;
                     last_match = ip;
+
+                    length = 0;
+                    distance = 0;
+                    match_start = 0;
                     continue 'outer;
                 }
 
