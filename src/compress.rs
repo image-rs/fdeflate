@@ -197,7 +197,14 @@ struct CacheTable {
     links: Box<[u32; WINDOW_SIZE]>,
 
     search_depth: u16,
+
+    /// If we already have a match of this length, limit lazy search to a smaller search depth.
+    good_length: u16,
+
+    /// Stop searching for matches if the length is at least this long.
     nice_length: u16,
+
+    /// Mask of low-bytes to consider for hashing.
     hash_mask: u64,
 }
 impl CacheTable {
@@ -207,12 +214,14 @@ impl CacheTable {
         Self {
             hash3_table: (min_match == 3)
                 .then(|| vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
-            hash4_table: None, //Some(vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
+            hash4_table: (min_match <= 4)
+                .then(|| vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
             hash_table: vec![0; CACHE5_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
             search_depth,
+            good_length: 32,
             nice_length,
-            hash_mask: (1 << (min_match.max(4) * 8)) - 1,
+            hash_mask: (1 << (min_match.max(5) * 8)) - 1,
         }
     }
 
@@ -231,7 +240,7 @@ impl CacheTable {
         let mut best_ip = 0;
 
         let mut n = self.search_depth;
-        if min_match > 3 {
+        if min_match >= self.good_length {
             n /= 2;
         }
 
@@ -287,7 +296,7 @@ impl CacheTable {
             let hash3 = compute_hash3(value as u32);
             if best_length < min_match && min_match <= 3 {
                 let hash3_offset = hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
-                if hash3_offset >= ip.saturating_sub(64).max(1) {
+                if hash3_offset >= ip.saturating_sub(8192).max(1) {
                     let (length, start) = match_length(data, anchor, ip, hash3_offset);
                     if length >= 3 {
                         best_length = length;
@@ -381,11 +390,11 @@ impl<W: Write> Compressor<W> {
             writer,
             pending: Vec::new(),
 
-            min_match: 3,
-            search_depth: 1500,
-            nice_length: 258,
-            skip_ahead_shift: 29,
-            max_lazy: 64,
+            min_match: 6,
+            search_depth: 8,
+            nice_length: 8,
+            skip_ahead_shift: 1,
+            max_lazy: 0,
         };
         compressor.write_headers()?;
         Ok(compressor)
@@ -437,37 +446,39 @@ impl<W: Write> Compressor<W> {
             'outer: while symbols.len() < 16384 && ip + 8 <= data.len() {
                 let current = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
 
-                if current == 0 {
-                    for j in last_match..ip {
-                        symbols.push(Symbol::Literal(data[j]));
-                    }
-
-                    if ip == 0 || data[ip - 1] != 0 {
-                        symbols.push(Symbol::Literal(0));
-                        ip += 1;
-                    }
-
-                    let mut run_length = 0;
-                    while ip < data.len() && data[ip] == 0 && run_length < 258 {
-                        run_length += 1;
-                        ip += 1;
-                    }
-
-                    symbols.push(Symbol::Backref {
-                        length: run_length as u16,
-                        distance: 1,
-                        dist_sym: 0,
-                    });
-
-                    last_match = ip;
-
-                    length = 0;
-                    distance = 0;
-                    match_start = 0;
-                    continue;
-                }
-
                 if length == 0 {
+                    if current == 0 {
+                        while ip > last_match && data[ip - 1] == 0 {
+                            ip -= 1;
+                        }
+
+                        for j in last_match..ip {
+                            symbols.push(Symbol::Literal(data[j]));
+                        }
+
+                        if ip == 0 || data[ip - 1] != 0 {
+                            symbols.push(Symbol::Literal(0));
+                            ip += 1;
+                        }
+
+                        let mut run_length = 0;
+                        while ip < data.len() && data[ip] == 0 && run_length < 258 {
+                            run_length += 1;
+                            ip += 1;
+                        }
+
+                        symbols.push(Symbol::Backref {
+                            length: run_length as u16,
+                            distance: 1,
+                            dist_sym: 0,
+                        });
+
+                        last_match = ip;
+
+                        length = 0;
+                        continue;
+                    }
+
                     (length, distance, match_start) =
                         matches.get_and_insert(&data, last_match, ip, current, 3);
                 }
@@ -528,8 +539,6 @@ impl<W: Write> Compressor<W> {
                     last_match = ip;
 
                     length = 0;
-                    distance = 0;
-                    match_start = 0;
                     continue 'outer;
                 }
 
@@ -733,7 +742,16 @@ impl<W> StoredOnlyCompressor<W> {
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
     let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
     compressor.write_data(input).unwrap();
-    compressor.finish().unwrap()
+    let mut compressed = compressor.finish().unwrap();
+
+    if compressed.len() > StoredOnlyCompressor::<io::Cursor<&[u8]>>::compressed_size(input.len()) {
+        compressed.clear();
+        let mut compressor = StoredOnlyCompressor::new(io::Cursor::new(compressed)).unwrap();
+        compressor.write_data(input).unwrap();
+        compressor.finish().unwrap().into_inner()
+    } else {
+        compressed
+    }
 }
 
 #[cfg(test)]
