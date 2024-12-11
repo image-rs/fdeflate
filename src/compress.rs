@@ -166,7 +166,10 @@ fn compute_hash(v: u64) -> u32 {
 }
 
 fn match_length(data: &[u8], anchor: usize, mut ip: usize, mut prev_index: usize) -> (u16, usize) {
-    assert!(prev_index < ip, "{prev_index}, {ip}");
+    assert!(
+        prev_index < ip,
+        "Match past current position: {prev_index} {ip}"
+    );
 
     if data[ip] != data[prev_index] {
         return (0, ip);
@@ -393,7 +396,7 @@ impl<W: Write> Compressor<W> {
             min_match: 6,
             search_depth: 8,
             nice_length: 8,
-            skip_ahead_shift: 1,
+            skip_ahead_shift: 3,
             max_lazy: 0,
         };
         compressor.write_headers()?;
@@ -424,7 +427,10 @@ impl<W: Write> Compressor<W> {
         let data = std::mem::take(&mut self.pending);
 
         enum Symbol {
-            Literal(u8),
+            LiteralRun {
+                start: u32,
+                end: u32,
+            },
             Backref {
                 length: u16,
                 distance: u16,
@@ -452,14 +458,14 @@ impl<W: Write> Compressor<W> {
                             ip -= 1;
                         }
 
-                        for j in last_match..ip {
-                            symbols.push(Symbol::Literal(data[j]));
-                        }
-
                         if ip == 0 || data[ip - 1] != 0 {
-                            symbols.push(Symbol::Literal(0));
                             ip += 1;
                         }
+
+                    symbols.push(Symbol::LiteralRun {
+                        start: last_match as u32,
+                        end: ip as u32,
+                    });
 
                         let mut run_length = 0;
                         while ip < data.len() && data[ip] == 0 && run_length < 258 {
@@ -508,9 +514,10 @@ impl<W: Write> Compressor<W> {
                     }
                     assert!(last_match <= match_start);
 
-                    for j in last_match..match_start {
-                        symbols.push(Symbol::Literal(data[j]));
-                    }
+                    symbols.push(Symbol::LiteralRun {
+                        start: last_match as u32,
+                        end: match_start as u32,
+                    });
 
                     symbols.push(Symbol::Backref {
                         length: length as u16,
@@ -550,9 +557,10 @@ impl<W: Write> Compressor<W> {
                 ip += 1 + ((ip - last_match) >> self.skip_ahead_shift);
             }
             if data.len() < ip + 8 {
-                for j in last_match..data.len() {
-                    symbols.push(Symbol::Literal(data[j]));
-                }
+                symbols.push(Symbol::LiteralRun {
+                    start: last_match as u32,
+                    end: data.len() as u32,
+                });
                 ip = data.len();
             }
 
@@ -561,7 +569,11 @@ impl<W: Write> Compressor<W> {
             frequencies[256] = 1;
             for symbol in &symbols {
                 match symbol {
-                    Symbol::Literal(lit) => frequencies[*lit as usize] += 1,
+                    Symbol::LiteralRun { start, end } => {
+                        for lit in &data[*start as usize..*end as usize] {
+                            frequencies[*lit as usize] += 1;
+                        }
+                    }
                     Symbol::Backref {
                         length, dist_sym, ..
                     } => {
@@ -618,9 +630,34 @@ impl<W: Write> Compressor<W> {
 
             for symbol in &symbols {
                 match symbol {
-                    Symbol::Literal(lit) => {
-                        let sym = *lit as usize;
-                        self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                    Symbol::LiteralRun { start, end } => {
+                        let mut groups = data[*start as usize..*end as usize].chunks_exact(4);
+                        for group in &mut groups {
+                            let code0 = codes[group[0] as usize] as u64;
+                            let code1 = codes[group[1] as usize] as u64;
+                            let code2 = codes[group[2] as usize] as u64;
+                            let code3 = codes[group[3] as usize] as u64;
+
+                            let len0 = lengths[group[0] as usize];
+                            let len1 = lengths[group[1] as usize];
+                            let len2 = lengths[group[2] as usize];
+                            let len3 = lengths[group[3] as usize];
+
+                            self.write_bits(
+                                code0
+                                    | (code1 << len0)
+                                    | (code2 << (len0 + len1))
+                                    | (code3 << (len0 + len1 + len2)),
+                                len0 + len1 + len2 + len3,
+                            )?;
+                        }
+
+                        for &lit in groups.remainder() {
+                            self.write_bits(
+                                codes[lit as usize] as u64,
+                                lengths[lit as usize] as u8,
+                            )?;
+                        }
                     }
                     Symbol::Backref {
                         length,
