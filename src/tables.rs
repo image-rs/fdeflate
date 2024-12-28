@@ -90,21 +90,29 @@ pub(crate) const DIST_SYM_TO_DIST_BASE: [u16; 30] = [
 /// The main litlen_table uses a 12-bit input to lookup the meaning of the symbol. The table is
 /// split into 4 sections:
 ///
-///   aaaaaaaa_bbbbbbbb_1000yyyy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
+///   aaaaaaaa_bbbbbbbb_100000yy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
 ///   0000000z_zzzzzzzz_00000yyy_0000xxxx  x = input_advance_bits, y = extra_bits, z = distance_base (length)
 ///   00000000_00000000_01000000_0000xxxx  x = input_advance_bits (EOF)
-///   0000xxxx_xxxxxxxx_01100000_00000000  x = secondary_table_index
+///   0000xxxx_xxxxxxxx_01100000_mmmmmmmm  x = secondary_table_index,  m = overflow bits mask
 ///   00000000_00000000_01000000_00000000  invalid code
 pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
     let mut entries = [EXCEPTIONAL_ENTRY; 288];
     let mut i = 0;
     while i < 256 {
+        // Case #1:
+        // 00000000_iiiiiiii_10000001_0000???? (? = will be filled by huffman::build_table)
+        // aaaaaaaa_bbbbbbbb_100000yy_0000xxxx
+        // x = input_advance_bits, y = output_advance_bytes (literal)
         entries[i] = (i as u32) << 16 | LITERAL_ENTRY | (1 << 8);
         i += 1;
     }
 
     let mut i = 257;
     while i < 286 {
+        // Case #2:
+        // 0000000z_zzzzzzzz_00000yyy_0000???? (? = will be filled by huffman::build_table)
+        // 0000000z_zzzzzzzz_00000yyy_0000xxxx
+        // x = input_advance_bits, y = extra_bits, z = distance_base (length)
         entries[i] = (LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16
             | (LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8;
         i += 1;
