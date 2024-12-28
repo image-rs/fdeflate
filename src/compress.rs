@@ -195,7 +195,7 @@ const WINDOW_SIZE: usize = 32768;
 
 struct CacheTable {
     hash3_table: Option<Box<[u32; CACHE3_SIZE]>>,
-    hash4_table: Option<Box<[u32; CACHE4_SIZE]>>,
+    // hash4_table: Option<Box<[u32; CACHE4_SIZE]>>,
     hash_table: Box<[u32; CACHE5_SIZE]>,
     links: Box<[u32; WINDOW_SIZE]>,
 
@@ -217,14 +217,14 @@ impl CacheTable {
         Self {
             hash3_table: (min_match == 3)
                 .then(|| vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
-            hash4_table: (min_match <= 4)
-                .then(|| vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
+            // hash4_table: (min_match <= 4)
+            //     .then(|| vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
             hash_table: vec![0; CACHE5_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
             search_depth,
             good_length: 32,
             nice_length,
-            hash_mask: (1 << (min_match.max(5) * 8)) - 1,
+            hash_mask: (1 << (min_match.max(4) * 8)) - 1,
         }
     }
 
@@ -244,7 +244,7 @@ impl CacheTable {
 
         let mut n = self.search_depth;
         if min_match >= self.good_length {
-            n /= 2;
+            n >>= 2;
         }
 
         let hash = compute_hash(value & self.hash_mask);
@@ -266,6 +266,8 @@ impl CacheTable {
                 best_length = length;
                 best_offset = offset as u32;
                 best_ip = start;
+            // } else if best_length > min_match {
+            //     break;
             }
             if length >= self.nice_length || ip + length as usize == data.len() {
                 break;
@@ -279,21 +281,21 @@ impl CacheTable {
             offset = self.links[offset % WINDOW_SIZE] as usize;
         }
 
-        if let Some(hash4_table) = &mut self.hash4_table {
-            let hash4 = compute_hash4(value);
-            if best_length < 4 {
-                let hash4_offset = hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
-                if hash4_offset >= ip.saturating_sub(8192).max(1) {
-                    let (length, start) = match_length(data, anchor, ip, hash4_offset);
-                    if length >= 4 {
-                        best_length = length;
-                        best_offset = hash4_offset as u32;
-                        best_ip = start;
-                    }
-                }
-            }
-            hash4_table[(hash4 as usize) % CACHE4_SIZE] = ip as u32;
-        }
+        // if let Some(hash4_table) = &mut self.hash4_table {
+        //     let hash4 = compute_hash4(value);
+        //     if best_length < 4 {
+        //         let hash4_offset = hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
+        //         if hash4_offset >= ip.saturating_sub(8192).max(1) {
+        //             let (length, start) = match_length(data, anchor, ip, hash4_offset);
+        //             if length >= 4 {
+        //                 best_length = length;
+        //                 best_offset = hash4_offset as u32;
+        //                 best_ip = start;
+        //             }
+        //         }
+        //     }
+        //     hash4_table[(hash4 as usize) % CACHE4_SIZE] = ip as u32;
+        // }
 
         if let Some(hash3_table) = &mut self.hash3_table {
             let hash3 = compute_hash3(value as u32);
@@ -323,10 +325,10 @@ impl CacheTable {
     }
 
     fn insert(&mut self, value: u64, offset: usize) {
-        if let Some(hash4_table) = &mut self.hash4_table {
-            let hash4 = compute_hash4(value);
-            hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
-        }
+        // if let Some(hash4_table) = &mut self.hash4_table {
+        //     let hash4 = compute_hash4(value);
+        //     hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
+        // }
 
         if let Some(hash3_table) = &mut self.hash3_table {
             let hash3 = compute_hash3(value as u32);
@@ -394,8 +396,8 @@ impl<W: Write> Compressor<W> {
             pending: Vec::new(),
 
             min_match: 6,
-            search_depth: 8,
-            nice_length: 8,
+            search_depth: 300,
+            nice_length: 16,
             skip_ahead_shift: 3,
             max_lazy: 0,
         };
@@ -462,10 +464,10 @@ impl<W: Write> Compressor<W> {
                             ip += 1;
                         }
 
-                    symbols.push(Symbol::LiteralRun {
-                        start: last_match as u32,
-                        end: ip as u32,
-                    });
+                        symbols.push(Symbol::LiteralRun {
+                            start: last_match as u32,
+                            end: ip as u32,
+                        });
 
                         let mut run_length = 0;
                         while ip < data.len() && data[ip] == 0 && run_length < 258 {
@@ -490,24 +492,19 @@ impl<W: Write> Compressor<W> {
                 }
 
                 if length >= 3 {
-                    if match_start == ip
+                    if match_start + length as usize > ip + 1
                         && length < self.max_lazy
                         && ip + length as usize + 9 <= data.len()
                     {
                         ip += 1;
                         let (next_length, next_distance, next_match_start) =
-                            matches.get_and_insert(&data, last_match, ip, current >> 8, length);
-                        if next_length > 0 {
-                            if next_match_start < ip && distance > 1 {
-                                distance = next_distance;
-                                length = next_length;
-                                match_start = next_match_start;
-                            } else if next_length > length && next_match_start >= ip
-                            /* && (next_length > length || (next_length == length && next_index * 4 < index)) */
-                            {
-                                length = next_length;
-                                distance = next_distance;
-                                match_start = next_match_start;
+                            matches.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
+                        if next_length > 0 && match_start + 1 >= next_match_start {
+                            distance = next_distance;
+                            length = next_length;
+                            match_start = next_match_start;
+
+                            if next_match_start > match_start {
                                 continue;
                             }
                         }
