@@ -108,7 +108,7 @@ pub fn build_table(
         }
 
         if double_literal {
-            for len1 in 1..(length - 1) {
+            for len1 in 1..length {
                 let len2 = length - len1;
                 for sym1_index in offsets[len1]..next_index[len1] {
                     for sym2_index in offsets[len2]..next_index[len2] {
@@ -142,6 +142,7 @@ pub fn build_table(
         let mut subtable_prefix = !0;
         for length in (primary_table_bits + 1)..=max_length {
             let subtable_size = 1 << (length - primary_table_bits);
+            let overflow_bits_mask = subtable_size as u32 - 1;
             for _ in 0..histogram[length] {
                 // If the codeword's prefix doesn't match the current subtable, create a new
                 // subtable.
@@ -151,7 +152,7 @@ pub fn build_table(
                     primary_table[subtable_prefix as usize] = ((subtable_start as u32) << 16)
                         | EXCEPTIONAL_ENTRY
                         | SECONDARY_TABLE_ENTRY
-                        | (subtable_size as u32 - 1);
+                        | overflow_bits_mask;
                     secondary_table.resize(subtable_start + subtable_size, 0);
                 }
 
@@ -170,13 +171,311 @@ pub fn build_table(
             if length < max_length && codeword & primary_table_mask == subtable_prefix {
                 secondary_table.extend_from_within(subtable_start..);
                 let subtable_size = secondary_table.len() - subtable_start;
+                let overflow_bits_mask = subtable_size as u32 - 1;
                 primary_table[subtable_prefix as usize] = ((subtable_start as u32) << 16)
                     | EXCEPTIONAL_ENTRY
                     | SECONDARY_TABLE_ENTRY
-                    | (subtable_size as u32 - 1);
+                    | overflow_bits_mask;
             }
         }
     }
 
     true
+}
+
+#[cfg(test)]
+mod test {
+    use super::{LITERAL_ENTRY, SECONDARY_TABLE_ENTRY};
+    use crate::tables::LITLEN_TABLE_ENTRIES;
+
+    fn validate_tables(
+        primary_table_bits: usize,
+        lengths: &[u8],
+        primary_table: &[u32],
+        secondary_table: &[u16],
+    ) {
+        let expecting_only_double_literals =
+            (*lengths.iter().max().unwrap() as usize) * 2 <= primary_table_bits;
+        for (i, entry) in primary_table.into_iter().enumerate() {
+            if 0 != entry & LITERAL_ENTRY {
+                // Expected format: aaaaaaaa_bbbbbbbb_100000yy_0000xxxx
+                match entry >> 8 & 0x7f {
+                    1 => {
+                        if expecting_only_double_literals {
+                            panic!(
+                                "Unexpected single literal: index={i} ({i:b}); entry=0b{entry:b}"
+                            );
+                        }
+                    }
+                    2 => (),
+                    other => panic!("Unexpected output_advance_bytes={other}: index={i} ({i:b})"),
+                }
+
+                let input_bits = entry & 0xff;
+                if input_bits == 0 {
+                    panic!("input_advance_bits unexpectedly equal to 0");
+                } else if input_bits > 15 {
+                    panic!("Unexpectedly big input_advance_bits: {}", input_bits);
+                }
+
+                let symbol_mask = (1 << lengths.len().min(256).ilog2() + 1) - 1;
+                let s1 = entry >> 16 & 0xff;
+                if 0 != s1 & !symbol_mask {
+                    panic!("Unexpectedly big symbol: {}", s1);
+                }
+                let s2 = entry >> 24 & 0xff;
+                if 0 != s2 & !symbol_mask {
+                    panic!("Unexpectedly big symbol: {}", s2);
+                }
+            } else if 0 != entry & SECONDARY_TABLE_ENTRY {
+                // Expected format: 0000xxxx_xxxxxxxx_01100000_mmmmmmmm
+                let overflow_bits_mask = (entry & 0xff) as usize;
+                let overflow_bits = overflow_bits_mask.trailing_ones() as usize;
+                if overflow_bits == 0 {
+                    panic!("Unexpectedly missing mask: index={i} ({i:b}), entry={entry:b}");
+                }
+                if overflow_bits + primary_table_bits > 15 {
+                    // Section 3.2.7 of https://www.ietf.org/rfc/rfc1951.txt implies
+                    // that codeword lengths are at most 15.
+                    panic!("Unexpectedly long symbol: index={i} ({i:b}), entry={entry:b}");
+                }
+                let index2_base = (entry >> 16) as usize;
+                assert!(index2_base + overflow_bits_mask <= secondary_table.len());
+            } else {
+                // TODO: Provide test coverage/support for EOF symbol (257th symbol - 256)
+                // and distance codes (even bigger symbols).
+                assert!(lengths.len() > 256);
+            }
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum LitlenResult {
+        SingleLiteral { symbol: u8, input_bits: usize },
+        DoubleLiteral { s1: u8, s2: u8, input_bits: usize },
+        SecondaryTableLiteral { symbol: u16, input_bits: usize },
+    }
+
+    struct LitlenTables {
+        primary_table_bits: usize,
+        primary_table_mask: u64,
+        primary_table: Vec<u32>,
+        secondary_table: Vec<u16>,
+    }
+
+    impl LitlenTables {
+        fn new(primary_table_bits: usize, lengths: &[u8]) -> Option<Self> {
+            let primary_table_size = 1 << primary_table_bits;
+            let primary_table_mask = (primary_table_size - 1).try_into().unwrap();
+            let mut primary_table = vec![0; primary_table_size];
+            let mut secondary_table = Vec::new();
+            let mut codes = [0; 288];
+
+            const IS_DISTANCE_TABLE: bool = false;
+            const DOUBLE_LITERAL: bool = true;
+
+            let success = super::build_table(
+                lengths,
+                &LITLEN_TABLE_ENTRIES,
+                &mut codes,
+                &mut primary_table,
+                &mut secondary_table,
+                IS_DISTANCE_TABLE,
+                DOUBLE_LITERAL,
+            );
+
+            if success {
+                validate_tables(
+                    primary_table_bits,
+                    lengths,
+                    &primary_table,
+                    &secondary_table,
+                );
+                Some(Self {
+                    primary_table_bits,
+                    primary_table_mask,
+                    primary_table,
+                    secondary_table,
+                })
+            } else {
+                None
+            }
+        }
+
+        fn decode(&self, input: u64) -> LitlenResult {
+            let index = (input & self.primary_table_mask) as usize;
+            let entry = self.primary_table[index];
+            if entry & LITERAL_ENTRY != 0 {
+                let input_bits = (entry & 0xf) as usize;
+                let s1 = (entry >> 16) as u8;
+                let s2 = (entry >> 24) as u8;
+
+                let symbol_count = (entry & 0xf00) >> 8;
+                match symbol_count {
+                    1 => LitlenResult::SingleLiteral {
+                        symbol: s1,
+                        input_bits,
+                    },
+                    2 => LitlenResult::DoubleLiteral { s1, s2, input_bits },
+                    _ => unreachable!(),
+                }
+            } else if entry & SECONDARY_TABLE_ENTRY != 0 {
+                let input2 = input >> self.primary_table_bits;
+                let index2 = (entry >> 16) + ((input2 as u32) & (entry & 0xff));
+                let entry2 = self.secondary_table[index2 as usize];
+                let input_bits = (entry2 & 0xf) as usize;
+                let symbol = entry2 >> 4;
+                LitlenResult::SecondaryTableLiteral { symbol, input_bits }
+            } else {
+                unreachable!("TODO: implement test covereage for this case")
+            }
+        }
+    }
+
+    #[test]
+    fn test_rfc1951_example1() {
+        // https://datatracker.ietf.org/doc/html/rfc1951 gives the following example
+        // on page 8:
+        //
+        //    Symbol  Code
+        //    ------  ----
+        //    A       10
+        //    B       0
+        //    C       110
+        //    D       111
+        //
+        // The code is completely defined by the sequence of bit lengths (2, 1, 3, 3).
+        let t = LitlenTables::new(12, &[2, 1, 3, 3]).unwrap();
+        assert_eq!(
+            t.decode(0b_0_0_0000000_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 1,
+                s2: 1,
+                input_bits: 2
+            },
+        );
+        assert_eq!(
+            t.decode(0b_110_110_00_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 2,
+                s2: 2,
+                input_bits: 6
+            },
+        );
+        assert_eq!(
+            t.decode(0b_111_111_00_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 3,
+                s2: 3,
+                input_bits: 6
+            },
+        );
+        assert_eq!(
+            t.decode(0b_0_10_00000_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 1,
+                s2: 0,
+                input_bits: 3
+            },
+        );
+    }
+
+    #[test]
+    fn test_rfc1951_example2() {
+        // https://datatracker.ietf.org/doc/html/rfc1951 gives the following example
+        // on page 9:
+        //
+        //    Symbol Length   Code
+        //    ------ ------   ----
+        //    A       3        010
+        //    B       3        011
+        //    C       3        100
+        //    D       3        101
+        //    E       3        110
+        //    F       2         00
+        //    G       4       1110
+        //    H       4       1111
+        let t = LitlenTables::new(12, &[3, 3, 3, 3, 3, 2, 4, 4]).unwrap();
+        assert_eq!(
+            t.decode(0b_010_011_00_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 0,
+                s2: 1,
+                input_bits: 6
+            },
+        );
+        assert_eq!(
+            t.decode(0b_00_00_0000_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 5,
+                s2: 5,
+                input_bits: 4
+            },
+        );
+        assert_eq!(
+            t.decode(0b_1111_1110_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 7,
+                s2: 6,
+                input_bits: 8
+            },
+        );
+    }
+
+    #[test]
+    fn test_secondary_table() {
+        // To smoke test the secondary table usage, we use a lopsided
+        // tree that results in codes that are up to 15 bits long:
+        //
+        //    Symbol Length                 Code
+        //    ------ ------   ------------------
+        //    0       1                        0
+        //    1       2                       10
+        //    2       3                      110
+        //    3       4                     1110
+        //    4       5                   1_1110
+        //    5       6                  11_1110
+        //    6       7                 111_1110
+        //    7       8                1111_1110
+        //    8       9              1_1111_1110
+        //    9       10            11_1111_1110
+        //    10      11           111_1111_1110
+        //    11      12          1111_1111_1110
+        //    12      13        1_1111_1111_1110
+        //    13      14       11_1111_1111_1110
+        //    14      15      111_1111_1111_1110
+        //    15      15      111_1111_1111_1111
+        let t = LitlenTables::new(12, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15])
+            .unwrap();
+        assert_eq!(
+            t.decode(0b_0_0_000000_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 0,
+                s2: 0,
+                input_bits: 2
+            },
+        );
+        assert_eq!(
+            t.decode(0b_1110_1110_u8.reverse_bits() as u64),
+            LitlenResult::DoubleLiteral {
+                s1: 3,
+                s2: 3,
+                input_bits: 8
+            },
+        );
+        assert_eq!(
+            t.decode(0b_1111_1111_1111_1110u16.reverse_bits() as u64),
+            LitlenResult::SecondaryTableLiteral {
+                symbol: 15,
+                input_bits: 15
+            },
+        );
+        assert_eq!(
+            t.decode(0b_1111_1111_1111_1111u16.reverse_bits() as u64),
+            LitlenResult::SecondaryTableLiteral {
+                symbol: 15,
+                input_bits: 15
+            },
+        );
+    }
 }
