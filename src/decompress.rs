@@ -416,12 +416,17 @@ impl Decompressor {
         Ok(())
     }
 
+    /// Returns:
+    /// - Whether this compressed block ended or not
+    /// - The new value of `output_index`
     fn read_compressed(
         &mut self,
         remaining_input: &mut &[u8],
         output: &mut [u8],
         mut output_index: usize,
-    ) -> Result<usize, DecompressionError> {
+    ) -> Result<(CompressedBlockStatus, usize), DecompressionError> {
+        debug_assert_eq!(self.state, State::CompressedData);
+
         // Fast decoding loop.
         //
         // This loop is optimized for speed and is the main decoding loop for the decompressor,
@@ -436,10 +441,7 @@ impl Decompressor {
         //   has 64-bits of valid data (even though nbits will be in 56..=63).
         self.bits.fill_buffer(remaining_input);
         let mut litlen_entry = self.compression.litlen_table[(self.bits.buffer & 0xfff) as usize];
-        while self.state == State::CompressedData
-            && output_index + 8 <= output.len()
-            && remaining_input.len() >= 8
-        {
+        while output_index + 8 <= output.len() && remaining_input.len() >= 8 {
             // First check whether the next symbol is a literal. This code does up to 2 additional
             // table lookups to decode more literals.
             let mut bits;
@@ -526,11 +528,7 @@ impl Decompressor {
                         }
                         256 => {
                             self.bits.consume_bits(litlen_code_bits);
-                            self.state = match self.last_block {
-                                true => State::Checksum,
-                                false => State::BlockHeader,
-                            };
-                            break;
+                            return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                         }
                         _ => (
                             LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
@@ -542,11 +540,7 @@ impl Decompressor {
                     return Err(DecompressionError::InvalidLiteralLengthCode);
                 } else {
                     self.bits.consume_bits(litlen_code_bits);
-                    self.state = match self.last_block {
-                        true => State::Checksum,
-                        false => State::BlockHeader,
-                    };
-                    break;
+                    return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                 };
             bits >>= litlen_code_bits;
 
@@ -636,7 +630,7 @@ impl Decompressor {
         //
         // This loop processes the remaining input when we're too close to the end of the input or
         // output to use the fast loop.
-        while let State::CompressedData = self.state {
+        loop {
             self.bits.fill_buffer(remaining_input);
             if output_index == output.len() {
                 break;
@@ -702,11 +696,7 @@ impl Decompressor {
                         continue;
                     } else if litlen_symbol == 256 {
                         self.bits.consume_bits(litlen_code_bits);
-                        self.state = match self.last_block {
-                            true => State::Checksum,
-                            false => State::BlockHeader,
-                        };
-                        break;
+                        return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                     }
 
                     (
@@ -721,11 +711,7 @@ impl Decompressor {
                         break;
                     }
                     self.bits.consume_bits(litlen_code_bits);
-                    self.state = match self.last_block {
-                        true => State::Checksum,
-                        false => State::BlockHeader,
-                    };
-                    break;
+                    return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                 };
             bits >>= litlen_code_bits;
 
@@ -816,20 +802,16 @@ impl Decompressor {
             output_index += copy_length;
         }
 
-        if self.state == State::CompressedData
-            && self.queued_output.is_none()
+        if self.queued_output.is_none()
             && self.bits.nbits >= 15
             && self.bits.peek_bits(15) as u16 & self.compression.eof_mask
                 == self.compression.eof_code
         {
             self.bits.consume_bits(self.compression.eof_bits);
-            self.state = match self.last_block {
-                true => State::Checksum,
-                false => State::BlockHeader,
-            };
+            return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
         }
 
-        Ok(output_index)
+        Ok((CompressedBlockStatus::MoreDataPresent, output_index))
     }
 
     /// Decompresses a chunk of data.
@@ -927,8 +909,15 @@ impl Decompressor {
                     self.read_code_lengths(&mut remaining_input)?;
                 }
                 State::CompressedData => {
-                    output_index =
-                        self.read_compressed(&mut remaining_input, output, output_index)?
+                    let (compresed_block_status, new_output_index) =
+                        self.read_compressed(&mut remaining_input, output, output_index)?;
+                    output_index = new_output_index;
+                    if compresed_block_status == CompressedBlockStatus::ReachedEndOfBlock {
+                        self.state = match self.last_block {
+                            true => State::Checksum,
+                            false => State::BlockHeader,
+                        };
+                    }
                 }
                 State::UncompressedData => {
                     // Drain any bytes from our buffer.
@@ -1008,6 +997,7 @@ impl Decompressor {
     }
 }
 
+#[derive(Debug)]
 struct BitBuffer {
     buffer: u64,
     nbits: u8,
@@ -1050,9 +1040,16 @@ impl BitBuffer {
     }
 }
 
+#[derive(Debug)]
 enum QueuedOutput {
     Rle { data: u8, length: NonZeroUsize },
     Backref { dist: usize, length: NonZeroUsize },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CompressedBlockStatus {
+    MoreDataPresent,
+    ReachedEndOfBlock,
 }
 
 /// Decompress the given data.
