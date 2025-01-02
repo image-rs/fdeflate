@@ -1,4 +1,5 @@
 use simd_adler32::Adler32;
+use std::num::NonZeroUsize;
 
 use crate::{
     huffman::{self, build_table},
@@ -624,11 +625,8 @@ impl Decompressor {
                 let last = output[output_index - 1];
                 output[output_index..][..copy_length].fill(last);
 
-                if copy_length < length {
-                    self.queued_output = Some(QueuedOutput::Rle {
-                        data: last,
-                        length: length - copy_length,
-                    });
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    self.queued_output = Some(QueuedOutput::Rle { data: last, length });
                     output_index = output.len();
                     break;
                 }
@@ -653,11 +651,8 @@ impl Decompressor {
                     )
                 }
 
-                if copy_length < length {
-                    self.queued_output = Some(QueuedOutput::Backref {
-                        dist,
-                        length: length - copy_length,
-                    });
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    self.queued_output = Some(QueuedOutput::Backref { dist, length });
                     output_index = output.len();
                     break;
                 }
@@ -703,7 +698,7 @@ impl Decompressor {
                     output[output_index] = (litlen_entry >> 16) as u8;
                     self.queued_output = Some(QueuedOutput::Rle {
                         data: (litlen_entry >> 24) as u8,
-                        length: 1,
+                        length: NonZeroUsize::new(1).unwrap(),
                     });
                     output_index += 1;
                     self.consume_bits(litlen_code_bits);
@@ -814,11 +809,8 @@ impl Decompressor {
                 let last = output[output_index - 1];
                 output[output_index..][..copy_length].fill(last);
 
-                if copy_length < length {
-                    self.queued_output = Some(QueuedOutput::Rle {
-                        data: last,
-                        length: length - copy_length,
-                    });
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    self.queued_output = Some(QueuedOutput::Rle { data: last, length });
                     output_index = output.len();
                     break;
                 }
@@ -843,11 +835,8 @@ impl Decompressor {
                     )
                 }
 
-                if copy_length < length {
-                    self.queued_output = Some(QueuedOutput::Backref {
-                        dist,
-                        length: length - copy_length,
-                    });
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    self.queued_output = Some(QueuedOutput::Backref { dist, length });
                     output_index = output.len();
                     break;
                 }
@@ -907,28 +896,24 @@ impl Decompressor {
         if let Some(queued_output) = self.queued_output.take() {
             match queued_output {
                 QueuedOutput::Rle { data, length } => {
+                    let length: usize = length.into();
                     let n = length.min(output.len() - output_index);
                     output[output_index..][..n].fill(data);
                     output_index += n;
-                    if n < length {
-                        self.queued_output = Some(QueuedOutput::Rle {
-                            data,
-                            length: length - n,
-                        });
+                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
+                        self.queued_output = Some(QueuedOutput::Rle { data, length });
                         return Ok((0, n));
                     }
                 }
                 QueuedOutput::Backref { dist, length } => {
+                    let length: usize = length.into();
                     let n = length.min(output.len() - output_index);
                     for i in 0..n {
                         output[output_index + i] = output[output_index + i - dist];
                     }
                     output_index += n;
-                    if n < length {
-                        self.queued_output = Some(QueuedOutput::Backref {
-                            dist,
-                            length: length - n,
-                        });
+                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
+                        self.queued_output = Some(QueuedOutput::Backref { dist, length });
                         return Ok((0, n));
                     }
                 }
@@ -1050,8 +1035,8 @@ impl Decompressor {
 }
 
 enum QueuedOutput {
-    Rle { data: u8, length: usize },
-    Backref { dist: usize, length: usize },
+    Rle { data: u8, length: NonZeroUsize },
+    Backref { dist: usize, length: NonZeroUsize },
 }
 
 /// Decompress the given data.
