@@ -99,8 +99,7 @@ pub struct Decompressor {
     buffer: u64,
     nbits: u8,
 
-    queued_rle: Option<(u8, usize)>,
-    queued_backref: Option<(usize, usize)>,
+    queued_output: Option<QueuedOutput>,
     last_block: bool,
     fixed_table: bool,
 
@@ -139,8 +138,7 @@ impl Decompressor {
                 code_lengths: [0; 320],
             },
             uncompressed_bytes_left: 0,
-            queued_rle: None,
-            queued_backref: None,
+            queued_output: None,
             checksum: Adler32::new(),
             state: State::ZlibHeader,
             last_block: false,
@@ -627,7 +625,10 @@ impl Decompressor {
                 output[output_index..][..copy_length].fill(last);
 
                 if copy_length < length {
-                    self.queued_rle = Some((last, length - copy_length));
+                    self.queued_output = Some(QueuedOutput::Rle {
+                        data: last,
+                        length: length - copy_length,
+                    });
                     output_index = output.len();
                     break;
                 }
@@ -653,7 +654,10 @@ impl Decompressor {
                 }
 
                 if copy_length < length {
-                    self.queued_backref = Some((dist, length - copy_length));
+                    self.queued_output = Some(QueuedOutput::Backref {
+                        dist,
+                        length: length - copy_length,
+                    });
                     output_index = output.len();
                     break;
                 }
@@ -697,7 +701,10 @@ impl Decompressor {
                 } else {
                     debug_assert_eq!(advance_output_bytes, 2);
                     output[output_index] = (litlen_entry >> 16) as u8;
-                    self.queued_rle = Some(((litlen_entry >> 24) as u8, 1));
+                    self.queued_output = Some(QueuedOutput::Rle {
+                        data: (litlen_entry >> 24) as u8,
+                        length: 1,
+                    });
                     output_index += 1;
                     self.consume_bits(litlen_code_bits);
                     break;
@@ -808,7 +815,10 @@ impl Decompressor {
                 output[output_index..][..copy_length].fill(last);
 
                 if copy_length < length {
-                    self.queued_rle = Some((last, length - copy_length));
+                    self.queued_output = Some(QueuedOutput::Rle {
+                        data: last,
+                        length: length - copy_length,
+                    });
                     output_index = output.len();
                     break;
                 }
@@ -834,7 +844,10 @@ impl Decompressor {
                 }
 
                 if copy_length < length {
-                    self.queued_backref = Some((dist, length - copy_length));
+                    self.queued_output = Some(QueuedOutput::Backref {
+                        dist,
+                        length: length - copy_length,
+                    });
                     output_index = output.len();
                     break;
                 }
@@ -843,8 +856,7 @@ impl Decompressor {
         }
 
         if self.state == State::CompressedData
-            && self.queued_backref.is_none()
-            && self.queued_rle.is_none()
+            && self.queued_output.is_none()
             && self.nbits >= 15
             && self.peak_bits(15) as u16 & self.compression.eof_mask == self.compression.eof_code
         {
@@ -892,24 +904,34 @@ impl Decompressor {
         let mut remaining_input = input;
         let mut output_index = output_position;
 
-        if let Some((data, len)) = self.queued_rle.take() {
-            let n = len.min(output.len() - output_index);
-            output[output_index..][..n].fill(data);
-            output_index += n;
-            if n < len {
-                self.queued_rle = Some((data, len - n));
-                return Ok((0, n));
-            }
-        }
-        if let Some((dist, len)) = self.queued_backref.take() {
-            let n = len.min(output.len() - output_index);
-            for i in 0..n {
-                output[output_index + i] = output[output_index + i - dist];
-            }
-            output_index += n;
-            if n < len {
-                self.queued_backref = Some((dist, len - n));
-                return Ok((0, n));
+        if let Some(queued_output) = self.queued_output.take() {
+            match queued_output {
+                QueuedOutput::Rle { data, length } => {
+                    let n = length.min(output.len() - output_index);
+                    output[output_index..][..n].fill(data);
+                    output_index += n;
+                    if n < length {
+                        self.queued_output = Some(QueuedOutput::Rle {
+                            data,
+                            length: length - n,
+                        });
+                        return Ok((0, n));
+                    }
+                }
+                QueuedOutput::Backref { dist, length } => {
+                    let n = length.min(output.len() - output_index);
+                    for i in 0..n {
+                        output[output_index + i] = output[output_index + i - dist];
+                    }
+                    output_index += n;
+                    if n < length {
+                        self.queued_output = Some(QueuedOutput::Backref {
+                            dist,
+                            length: length - n,
+                        });
+                        return Ok((0, n));
+                    }
+                }
             }
         }
 
@@ -1025,6 +1047,11 @@ impl Decompressor {
     pub fn is_done(&self) -> bool {
         self.state == State::Done
     }
+}
+
+enum QueuedOutput {
+    Rle { data: u8, length: usize },
+    Backref { dist: usize, length: usize },
 }
 
 /// Decompress the given data.
