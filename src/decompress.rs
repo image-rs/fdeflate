@@ -151,6 +151,194 @@ impl Decompressor {
         self.ignore_adler32 = true;
     }
 
+    /// Decompresses a chunk of data.
+    ///
+    /// Returns the number of bytes read from `input` and the number of bytes written to `output`,
+    /// or an error if the deflate stream is not valid. `input` is the compressed data. `output` is
+    /// the buffer to write the decompressed data to, starting at index `output_position`.
+    /// `end_of_input` indicates whether more data may be available in the future.
+    ///
+    /// The contents of `output` after `output_position` are ignored. However, this function may
+    /// write additional data to `output` past what is indicated by the return value.
+    ///
+    /// When this function returns `Ok`, at least one of the following is true:
+    /// - The input is fully consumed.
+    /// - The output is full but there are more bytes to output.
+    /// - The deflate stream is complete (and `is_done` will return true).
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if `output_position` is out of bounds.
+    pub fn read(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        output_position: usize,
+        end_of_input: bool,
+    ) -> Result<(usize, usize), DecompressionError> {
+        if let State::Done = self.state {
+            return Ok((0, 0));
+        }
+
+        assert!(output_position <= output.len());
+
+        let mut remaining_input = input;
+        let mut output_index = output_position;
+
+        if let Some(queued_output) = self.queued_output.take() {
+            match queued_output {
+                QueuedOutput::Rle { data, length } => {
+                    let length: usize = length.into();
+                    let n = length.min(output.len() - output_index);
+                    output[output_index..][..n].fill(data);
+                    output_index += n;
+                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
+                        self.queued_output = Some(QueuedOutput::Rle { data, length });
+                        return Ok((0, n));
+                    }
+                }
+                QueuedOutput::Backref { dist, length } => {
+                    let length: usize = length.into();
+                    let n = length.min(output.len() - output_index);
+                    for i in 0..n {
+                        output[output_index + i] = output[output_index + i - dist];
+                    }
+                    output_index += n;
+                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
+                        self.queued_output = Some(QueuedOutput::Backref { dist, length });
+                        return Ok((0, n));
+                    }
+                }
+            }
+        }
+
+        // Main decoding state machine.
+        let mut last_state = None;
+        while last_state != Some(self.state) {
+            last_state = Some(self.state);
+            match self.state {
+                State::ZlibHeader => {
+                    self.bits.fill_buffer(&mut remaining_input);
+                    if self.bits.nbits < 16 {
+                        break;
+                    }
+
+                    let input0 = self.bits.peek_bits(8);
+                    let input1 = self.bits.peek_bits(16) >> 8 & 0xff;
+                    if input0 & 0x0f != 0x08
+                        || (input0 & 0xf0) > 0x70
+                        || input1 & 0x20 != 0
+                        || (input0 << 8 | input1) % 31 != 0
+                    {
+                        return Err(DecompressionError::BadZlibHeader);
+                    }
+
+                    self.bits.consume_bits(16);
+                    self.state = State::BlockHeader;
+                }
+                State::BlockHeader => {
+                    self.read_block_header(&mut remaining_input)?;
+                }
+                State::CodeLengthCodes => {
+                    self.read_code_length_codes(&mut remaining_input)?;
+                }
+                State::CodeLengths => {
+                    self.read_code_lengths(&mut remaining_input)?;
+                }
+                State::CompressedData => {
+                    let (compresed_block_status, new_output_index) =
+                        self.compression.read_compressed(
+                            &mut self.bits,
+                            &mut remaining_input,
+                            output,
+                            output_index,
+                            &mut self.queued_output,
+                        )?;
+                    output_index = new_output_index;
+                    if compresed_block_status == CompressedBlockStatus::ReachedEndOfBlock {
+                        self.state = match self.last_block {
+                            true => State::Checksum,
+                            false => State::BlockHeader,
+                        };
+                    }
+                }
+                State::UncompressedData => {
+                    // Drain any bytes from our buffer.
+                    debug_assert_eq!(self.bits.nbits % 8, 0);
+                    while self.bits.nbits > 0
+                        && self.uncompressed_bytes_left > 0
+                        && output_index < output.len()
+                    {
+                        output[output_index] = self.bits.peek_bits(8) as u8;
+                        self.bits.consume_bits(8);
+                        output_index += 1;
+                        self.uncompressed_bytes_left -= 1;
+                    }
+                    // Buffer may contain one additional byte. Clear it to avoid confusion.
+                    if self.bits.nbits == 0 {
+                        self.bits.buffer = 0;
+                    }
+
+                    // Copy subsequent bytes directly from the input.
+                    let copy_bytes = (self.uncompressed_bytes_left as usize)
+                        .min(remaining_input.len())
+                        .min(output.len() - output_index);
+                    output[output_index..][..copy_bytes]
+                        .copy_from_slice(&remaining_input[..copy_bytes]);
+                    remaining_input = &remaining_input[copy_bytes..];
+                    output_index += copy_bytes;
+                    self.uncompressed_bytes_left -= copy_bytes as u16;
+
+                    if self.uncompressed_bytes_left == 0 {
+                        self.state = if self.last_block {
+                            State::Checksum
+                        } else {
+                            State::BlockHeader
+                        };
+                    }
+                }
+                State::Checksum => {
+                    self.bits.fill_buffer(&mut remaining_input);
+
+                    let align_bits = self.bits.nbits % 8;
+                    if self.bits.nbits >= 32 + align_bits {
+                        self.checksum.write(&output[output_position..output_index]);
+                        if align_bits != 0 {
+                            self.bits.consume_bits(align_bits);
+                        }
+                        #[cfg(not(fuzzing))]
+                        if !self.ignore_adler32
+                            && (self.bits.peek_bits(32) as u32).swap_bytes()
+                                != self.checksum.finish()
+                        {
+                            return Err(DecompressionError::WrongChecksum);
+                        }
+                        self.state = State::Done;
+                        self.bits.consume_bits(32);
+                        break;
+                    }
+                }
+                State::Done => unreachable!(),
+            }
+        }
+
+        if !self.ignore_adler32 && self.state != State::Done {
+            self.checksum.write(&output[output_position..output_index]);
+        }
+
+        if self.state == State::Done || !end_of_input || output_index == output.len() {
+            let input_left = remaining_input.len();
+            Ok((input.len() - input_left, output_index - output_position))
+        } else {
+            Err(DecompressionError::InsufficientInput)
+        }
+    }
+
+    /// Returns true if the decompressor has finished decompressing the input.
+    pub fn is_done(&self) -> bool {
+        self.state == State::Done
+    }
+
     fn read_block_header(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
         self.bits.fill_buffer(remaining_input);
         if self.bits.nbits < 10 {
@@ -356,20 +544,15 @@ impl Decompressor {
             self.header.code_lengths[i] = 0;
         }
 
-        Self::build_tables(
-            self.header.hlit,
-            &self.header.code_lengths,
-            &mut self.compression,
-        )?;
+        self.compression
+            .build_tables(self.header.hlit, &self.header.code_lengths)?;
         self.state = State::CompressedData;
         Ok(())
     }
+}
 
-    fn build_tables(
-        hlit: usize,
-        code_lengths: &[u8],
-        compression: &mut CompressedBlock,
-    ) -> Result<(), DecompressionError> {
+impl CompressedBlock {
+    fn build_tables(&mut self, hlit: usize, code_lengths: &[u8]) -> Result<(), DecompressionError> {
         // If there is no code assigned for the EOF symbol then the bitstream is invalid.
         if code_lengths[256] == 0 {
             // TODO: Return a dedicated error in this case.
@@ -377,35 +560,35 @@ impl Decompressor {
         }
 
         let mut codes = [0; 288];
-        compression.secondary_table.clear();
+        self.secondary_table.clear();
         if !huffman::build_table(
             &code_lengths[..hlit],
             &LITLEN_TABLE_ENTRIES,
             &mut codes[..hlit],
-            &mut *compression.litlen_table,
-            &mut compression.secondary_table,
+            &mut *self.litlen_table,
+            &mut self.secondary_table,
             false,
             true,
         ) {
             return Err(DecompressionError::BadCodeLengthHuffmanTree);
         }
 
-        compression.eof_code = codes[256];
-        compression.eof_mask = (1 << code_lengths[256]) - 1;
-        compression.eof_bits = code_lengths[256];
+        self.eof_code = codes[256];
+        self.eof_mask = (1 << code_lengths[256]) - 1;
+        self.eof_bits = code_lengths[256];
 
         // Build the distance code table.
         let lengths = &code_lengths[288..320];
         if lengths == [0; 32] {
-            compression.dist_table.fill(0);
+            self.dist_table.fill(0);
         } else {
             let mut dist_codes = [0; 32];
             if !huffman::build_table(
                 lengths,
                 &tables::DISTANCE_TABLE_ENTRIES,
                 &mut dist_codes,
-                &mut *compression.dist_table,
-                &mut compression.dist_secondary_table,
+                &mut *self.dist_table,
+                &mut self.dist_secondary_table,
                 true,
                 false,
             ) {
@@ -420,13 +603,13 @@ impl Decompressor {
     /// - Whether this compressed block ended or not
     /// - The new value of `output_index`
     fn read_compressed(
-        &mut self,
+        &self,
+        bit_buffer: &mut BitBuffer,
         remaining_input: &mut &[u8],
         output: &mut [u8],
         mut output_index: usize,
+        queued_output: &mut Option<QueuedOutput>,
     ) -> Result<(CompressedBlockStatus, usize), DecompressionError> {
-        debug_assert_eq!(self.state, State::CompressedData);
-
         // Fast decoding loop.
         //
         // This loop is optimized for speed and is the main decoding loop for the decompressor,
@@ -439,24 +622,24 @@ impl Decompressor {
         // - The litlen_entry for the next loop iteration can be loaded in parallel with refilling
         //   the bit buffer. This is because when the input is non-empty, the bit buffer actually
         //   has 64-bits of valid data (even though nbits will be in 56..=63).
-        self.bits.fill_buffer(remaining_input);
-        let mut litlen_entry = self.compression.litlen_table[(self.bits.buffer & 0xfff) as usize];
+        bit_buffer.fill_buffer(remaining_input);
+        let mut litlen_entry = self.litlen_table[(bit_buffer.buffer & 0xfff) as usize];
         while output_index + 8 <= output.len() && remaining_input.len() >= 8 {
             // First check whether the next symbol is a literal. This code does up to 2 additional
             // table lookups to decode more literals.
             let mut bits;
             let mut litlen_code_bits = litlen_entry as u8;
             if litlen_entry & LITERAL_ENTRY != 0 {
-                let litlen_entry2 = self.compression.litlen_table
-                    [(self.bits.buffer >> litlen_code_bits & 0xfff) as usize];
+                let litlen_entry2 =
+                    self.litlen_table[(bit_buffer.buffer >> litlen_code_bits & 0xfff) as usize];
                 let litlen_code_bits2 = litlen_entry2 as u8;
-                let litlen_entry3 = self.compression.litlen_table
-                    [(self.bits.buffer >> (litlen_code_bits + litlen_code_bits2) & 0xfff) as usize];
+                let litlen_entry3 = self.litlen_table[(bit_buffer.buffer
+                    >> (litlen_code_bits + litlen_code_bits2)
+                    & 0xfff) as usize];
                 let litlen_code_bits3 = litlen_entry3 as u8;
-                let litlen_entry4 = self.compression.litlen_table[(self.bits.buffer
+                let litlen_entry4 = self.litlen_table[(bit_buffer.buffer
                     >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3)
-                    & 0xfff)
-                    as usize];
+                    & 0xfff) as usize];
 
                 let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
                 output[output_index] = (litlen_entry >> 16) as u8;
@@ -476,28 +659,28 @@ impl Decompressor {
                         output_index += advance_output_bytes3;
 
                         litlen_entry = litlen_entry4;
-                        self.bits
+                        bit_buffer
                             .consume_bits(litlen_code_bits + litlen_code_bits2 + litlen_code_bits3);
-                        self.bits.fill_buffer(remaining_input);
+                        bit_buffer.fill_buffer(remaining_input);
                         continue;
                     } else {
-                        self.bits.consume_bits(litlen_code_bits + litlen_code_bits2);
+                        bit_buffer.consume_bits(litlen_code_bits + litlen_code_bits2);
                         litlen_entry = litlen_entry3;
                         litlen_code_bits = litlen_code_bits3;
-                        self.bits.fill_buffer(remaining_input);
-                        bits = self.bits.buffer;
+                        bit_buffer.fill_buffer(remaining_input);
+                        bits = bit_buffer.buffer;
                     }
                 } else {
-                    self.bits.consume_bits(litlen_code_bits);
-                    bits = self.bits.buffer;
+                    bit_buffer.consume_bits(litlen_code_bits);
+                    bits = bit_buffer.buffer;
                     litlen_entry = litlen_entry2;
                     litlen_code_bits = litlen_code_bits2;
-                    if self.bits.nbits < 48 {
-                        self.bits.fill_buffer(remaining_input);
+                    if bit_buffer.nbits < 48 {
+                        bit_buffer.fill_buffer(remaining_input);
                     }
                 }
             } else {
-                bits = self.bits.buffer;
+                bits = bit_buffer.buffer;
             }
 
             // The next symbol is either a 13+ bit literal, back-reference, or an EOF symbol.
@@ -511,23 +694,21 @@ impl Decompressor {
                 } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
                     let secondary_table_index =
                         (litlen_entry >> 16) + ((bits >> 12) as u32 & (litlen_entry & 0xff));
-                    let secondary_entry =
-                        self.compression.secondary_table[secondary_table_index as usize];
+                    let secondary_entry = self.secondary_table[secondary_table_index as usize];
                     let litlen_symbol = secondary_entry >> 4;
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 
                     match litlen_symbol {
                         0..=255 => {
-                            self.bits.consume_bits(litlen_code_bits);
-                            litlen_entry =
-                                self.compression.litlen_table[(self.bits.buffer & 0xfff) as usize];
-                            self.bits.fill_buffer(remaining_input);
+                            bit_buffer.consume_bits(litlen_code_bits);
+                            litlen_entry = self.litlen_table[(bit_buffer.buffer & 0xfff) as usize];
+                            bit_buffer.fill_buffer(remaining_input);
                             output[output_index] = litlen_symbol as u8;
                             output_index += 1;
                             continue;
                         }
                         256 => {
-                            self.bits.consume_bits(litlen_code_bits);
+                            bit_buffer.consume_bits(litlen_code_bits);
                             return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                         }
                         _ => (
@@ -539,7 +720,7 @@ impl Decompressor {
                 } else if litlen_code_bits == 0 {
                     return Err(DecompressionError::InvalidLiteralLengthCode);
                 } else {
-                    self.bits.consume_bits(litlen_code_bits);
+                    bit_buffer.consume_bits(litlen_code_bits);
                     return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                 };
             bits >>= litlen_code_bits;
@@ -548,7 +729,7 @@ impl Decompressor {
             let length = length_base as usize + (bits & length_extra_mask) as usize;
             bits >>= length_extra_bits;
 
-            let dist_entry = self.compression.dist_table[(bits & 0x1ff) as usize];
+            let dist_entry = self.dist_table[(bits & 0x1ff) as usize];
             let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry & LITERAL_ENTRY != 0 {
                 (
                     (dist_entry >> 16) as u16,
@@ -560,8 +741,7 @@ impl Decompressor {
             } else {
                 let secondary_table_index =
                     (dist_entry >> 16) + ((bits >> 9) as u32 & (dist_entry & 0xff));
-                let secondary_entry =
-                    self.compression.dist_secondary_table[secondary_table_index as usize];
+                let secondary_entry = self.dist_secondary_table[secondary_table_index as usize];
                 let dist_symbol = (secondary_entry >> 4) as usize;
                 if dist_symbol >= 30 {
                     return Err(DecompressionError::InvalidDistanceCode);
@@ -580,11 +760,11 @@ impl Decompressor {
                 return Err(DecompressionError::DistanceTooFarBack);
             }
 
-            self.bits.consume_bits(
+            bit_buffer.consume_bits(
                 litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits,
             );
-            self.bits.fill_buffer(remaining_input);
-            litlen_entry = self.compression.litlen_table[(self.bits.buffer & 0xfff) as usize];
+            bit_buffer.fill_buffer(remaining_input);
+            litlen_entry = self.litlen_table[(bit_buffer.buffer & 0xfff) as usize];
 
             let copy_length = length.min(output.len() - output_index);
             if dist == 1 {
@@ -592,7 +772,7 @@ impl Decompressor {
                 output[output_index..][..copy_length].fill(last);
 
                 if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
-                    self.queued_output = Some(QueuedOutput::Rle { data: last, length });
+                    *queued_output = Some(QueuedOutput::Rle { data: last, length });
                     output_index = output.len();
                     break;
                 }
@@ -618,7 +798,7 @@ impl Decompressor {
                 }
 
                 if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
-                    self.queued_output = Some(QueuedOutput::Backref { dist, length });
+                    *queued_output = Some(QueuedOutput::Backref { dist, length });
                     output_index = output.len();
                     break;
                 }
@@ -631,13 +811,13 @@ impl Decompressor {
         // This loop processes the remaining input when we're too close to the end of the input or
         // output to use the fast loop.
         loop {
-            self.bits.fill_buffer(remaining_input);
+            bit_buffer.fill_buffer(remaining_input);
             if output_index == output.len() {
                 break;
             }
 
-            let mut bits = self.bits.buffer;
-            let litlen_entry = self.compression.litlen_table[(bits & 0xfff) as usize];
+            let mut bits = bit_buffer.buffer;
+            let litlen_entry = self.litlen_table[(bits & 0xfff) as usize];
             let litlen_code_bits = litlen_entry as u8;
 
             if litlen_entry & LITERAL_ENTRY != 0 {
@@ -645,29 +825,29 @@ impl Decompressor {
                 // output bytes and we can directly write them to the output buffer.
                 let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
 
-                if self.bits.nbits < litlen_code_bits {
+                if bit_buffer.nbits < litlen_code_bits {
                     break;
                 } else if output_index + 1 < output.len() {
                     output[output_index] = (litlen_entry >> 16) as u8;
                     output[output_index + 1] = (litlen_entry >> 24) as u8;
                     output_index += advance_output_bytes;
-                    self.bits.consume_bits(litlen_code_bits);
+                    bit_buffer.consume_bits(litlen_code_bits);
                     continue;
                 } else if output_index + advance_output_bytes == output.len() {
                     debug_assert_eq!(advance_output_bytes, 1);
                     output[output_index] = (litlen_entry >> 16) as u8;
                     output_index += 1;
-                    self.bits.consume_bits(litlen_code_bits);
+                    bit_buffer.consume_bits(litlen_code_bits);
                     break;
                 } else {
                     debug_assert_eq!(advance_output_bytes, 2);
                     output[output_index] = (litlen_entry >> 16) as u8;
-                    self.queued_output = Some(QueuedOutput::Rle {
+                    *queued_output = Some(QueuedOutput::Rle {
                         data: (litlen_entry >> 24) as u8,
                         length: NonZeroUsize::new(1).unwrap(),
                     });
                     output_index += 1;
-                    self.bits.consume_bits(litlen_code_bits);
+                    bit_buffer.consume_bits(litlen_code_bits);
                     break;
                 }
             }
@@ -682,20 +862,19 @@ impl Decompressor {
                 } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
                     let secondary_table_index =
                         (litlen_entry >> 16) + ((bits >> 12) as u32 & (litlen_entry & 0xff));
-                    let secondary_entry =
-                        self.compression.secondary_table[secondary_table_index as usize];
+                    let secondary_entry = self.secondary_table[secondary_table_index as usize];
                     let litlen_symbol = secondary_entry >> 4;
                     let litlen_code_bits = (secondary_entry & 0xf) as u8;
 
-                    if self.bits.nbits < litlen_code_bits {
+                    if bit_buffer.nbits < litlen_code_bits {
                         break;
                     } else if litlen_symbol < 256 {
-                        self.bits.consume_bits(litlen_code_bits);
+                        bit_buffer.consume_bits(litlen_code_bits);
                         output[output_index] = litlen_symbol as u8;
                         output_index += 1;
                         continue;
                     } else if litlen_symbol == 256 {
-                        self.bits.consume_bits(litlen_code_bits);
+                        bit_buffer.consume_bits(litlen_code_bits);
                         return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                     }
 
@@ -707,10 +886,10 @@ impl Decompressor {
                 } else if litlen_code_bits == 0 {
                     return Err(DecompressionError::InvalidLiteralLengthCode);
                 } else {
-                    if self.bits.nbits < litlen_code_bits {
+                    if bit_buffer.nbits < litlen_code_bits {
                         break;
                     }
-                    self.bits.consume_bits(litlen_code_bits);
+                    bit_buffer.consume_bits(litlen_code_bits);
                     return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
                 };
             bits >>= litlen_code_bits;
@@ -719,22 +898,21 @@ impl Decompressor {
             let length = length_base as usize + (bits & length_extra_mask) as usize;
             bits >>= length_extra_bits;
 
-            let dist_entry = self.compression.dist_table[(bits & 0x1ff) as usize];
+            let dist_entry = self.dist_table[(bits & 0x1ff) as usize];
             let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry & LITERAL_ENTRY != 0 {
                 (
                     (dist_entry >> 16) as u16,
                     (dist_entry >> 8) as u8 & 0xf,
                     dist_entry as u8,
                 )
-            } else if self.bits.nbits > litlen_code_bits + length_extra_bits + 9 {
+            } else if bit_buffer.nbits > litlen_code_bits + length_extra_bits + 9 {
                 if dist_entry >> 8 == 0 {
                     return Err(DecompressionError::InvalidDistanceCode);
                 }
 
                 let secondary_table_index =
                     (dist_entry >> 16) + ((bits >> 9) as u32 & (dist_entry & 0xff));
-                let secondary_entry =
-                    self.compression.dist_secondary_table[secondary_table_index as usize];
+                let secondary_entry = self.dist_secondary_table[secondary_table_index as usize];
                 let dist_symbol = (secondary_entry >> 4) as usize;
                 if dist_symbol >= 30 {
                     return Err(DecompressionError::InvalidDistanceCode);
@@ -754,13 +932,13 @@ impl Decompressor {
             let total_bits =
                 litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits;
 
-            if self.bits.nbits < total_bits {
+            if bit_buffer.nbits < total_bits {
                 break;
             } else if dist > output_index {
                 return Err(DecompressionError::DistanceTooFarBack);
             }
 
-            self.bits.consume_bits(total_bits);
+            bit_buffer.consume_bits(total_bits);
 
             let copy_length = length.min(output.len() - output_index);
             if dist == 1 {
@@ -768,7 +946,7 @@ impl Decompressor {
                 output[output_index..][..copy_length].fill(last);
 
                 if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
-                    self.queued_output = Some(QueuedOutput::Rle { data: last, length });
+                    *queued_output = Some(QueuedOutput::Rle { data: last, length });
                     output_index = output.len();
                     break;
                 }
@@ -794,7 +972,7 @@ impl Decompressor {
                 }
 
                 if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
-                    self.queued_output = Some(QueuedOutput::Backref { dist, length });
+                    *queued_output = Some(QueuedOutput::Backref { dist, length });
                     output_index = output.len();
                     break;
                 }
@@ -802,198 +980,15 @@ impl Decompressor {
             output_index += copy_length;
         }
 
-        if self.queued_output.is_none()
-            && self.bits.nbits >= 15
-            && self.bits.peek_bits(15) as u16 & self.compression.eof_mask
-                == self.compression.eof_code
+        if queued_output.is_none()
+            && bit_buffer.nbits >= 15
+            && bit_buffer.peek_bits(15) as u16 & self.eof_mask == self.eof_code
         {
-            self.bits.consume_bits(self.compression.eof_bits);
+            bit_buffer.consume_bits(self.eof_bits);
             return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
         }
 
         Ok((CompressedBlockStatus::MoreDataPresent, output_index))
-    }
-
-    /// Decompresses a chunk of data.
-    ///
-    /// Returns the number of bytes read from `input` and the number of bytes written to `output`,
-    /// or an error if the deflate stream is not valid. `input` is the compressed data. `output` is
-    /// the buffer to write the decompressed data to, starting at index `output_position`.
-    /// `end_of_input` indicates whether more data may be available in the future.
-    ///
-    /// The contents of `output` after `output_position` are ignored. However, this function may
-    /// write additional data to `output` past what is indicated by the return value.
-    ///
-    /// When this function returns `Ok`, at least one of the following is true:
-    /// - The input is fully consumed.
-    /// - The output is full but there are more bytes to output.
-    /// - The deflate stream is complete (and `is_done` will return true).
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if `output_position` is out of bounds.
-    pub fn read(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
-        output_position: usize,
-        end_of_input: bool,
-    ) -> Result<(usize, usize), DecompressionError> {
-        if let State::Done = self.state {
-            return Ok((0, 0));
-        }
-
-        assert!(output_position <= output.len());
-
-        let mut remaining_input = input;
-        let mut output_index = output_position;
-
-        if let Some(queued_output) = self.queued_output.take() {
-            match queued_output {
-                QueuedOutput::Rle { data, length } => {
-                    let length: usize = length.into();
-                    let n = length.min(output.len() - output_index);
-                    output[output_index..][..n].fill(data);
-                    output_index += n;
-                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
-                        self.queued_output = Some(QueuedOutput::Rle { data, length });
-                        return Ok((0, n));
-                    }
-                }
-                QueuedOutput::Backref { dist, length } => {
-                    let length: usize = length.into();
-                    let n = length.min(output.len() - output_index);
-                    for i in 0..n {
-                        output[output_index + i] = output[output_index + i - dist];
-                    }
-                    output_index += n;
-                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
-                        self.queued_output = Some(QueuedOutput::Backref { dist, length });
-                        return Ok((0, n));
-                    }
-                }
-            }
-        }
-
-        // Main decoding state machine.
-        let mut last_state = None;
-        while last_state != Some(self.state) {
-            last_state = Some(self.state);
-            match self.state {
-                State::ZlibHeader => {
-                    self.bits.fill_buffer(&mut remaining_input);
-                    if self.bits.nbits < 16 {
-                        break;
-                    }
-
-                    let input0 = self.bits.peek_bits(8);
-                    let input1 = self.bits.peek_bits(16) >> 8 & 0xff;
-                    if input0 & 0x0f != 0x08
-                        || (input0 & 0xf0) > 0x70
-                        || input1 & 0x20 != 0
-                        || (input0 << 8 | input1) % 31 != 0
-                    {
-                        return Err(DecompressionError::BadZlibHeader);
-                    }
-
-                    self.bits.consume_bits(16);
-                    self.state = State::BlockHeader;
-                }
-                State::BlockHeader => {
-                    self.read_block_header(&mut remaining_input)?;
-                }
-                State::CodeLengthCodes => {
-                    self.read_code_length_codes(&mut remaining_input)?;
-                }
-                State::CodeLengths => {
-                    self.read_code_lengths(&mut remaining_input)?;
-                }
-                State::CompressedData => {
-                    let (compresed_block_status, new_output_index) =
-                        self.read_compressed(&mut remaining_input, output, output_index)?;
-                    output_index = new_output_index;
-                    if compresed_block_status == CompressedBlockStatus::ReachedEndOfBlock {
-                        self.state = match self.last_block {
-                            true => State::Checksum,
-                            false => State::BlockHeader,
-                        };
-                    }
-                }
-                State::UncompressedData => {
-                    // Drain any bytes from our buffer.
-                    debug_assert_eq!(self.bits.nbits % 8, 0);
-                    while self.bits.nbits > 0
-                        && self.uncompressed_bytes_left > 0
-                        && output_index < output.len()
-                    {
-                        output[output_index] = self.bits.peek_bits(8) as u8;
-                        self.bits.consume_bits(8);
-                        output_index += 1;
-                        self.uncompressed_bytes_left -= 1;
-                    }
-                    // Buffer may contain one additional byte. Clear it to avoid confusion.
-                    if self.bits.nbits == 0 {
-                        self.bits.buffer = 0;
-                    }
-
-                    // Copy subsequent bytes directly from the input.
-                    let copy_bytes = (self.uncompressed_bytes_left as usize)
-                        .min(remaining_input.len())
-                        .min(output.len() - output_index);
-                    output[output_index..][..copy_bytes]
-                        .copy_from_slice(&remaining_input[..copy_bytes]);
-                    remaining_input = &remaining_input[copy_bytes..];
-                    output_index += copy_bytes;
-                    self.uncompressed_bytes_left -= copy_bytes as u16;
-
-                    if self.uncompressed_bytes_left == 0 {
-                        self.state = if self.last_block {
-                            State::Checksum
-                        } else {
-                            State::BlockHeader
-                        };
-                    }
-                }
-                State::Checksum => {
-                    self.bits.fill_buffer(&mut remaining_input);
-
-                    let align_bits = self.bits.nbits % 8;
-                    if self.bits.nbits >= 32 + align_bits {
-                        self.checksum.write(&output[output_position..output_index]);
-                        if align_bits != 0 {
-                            self.bits.consume_bits(align_bits);
-                        }
-                        #[cfg(not(fuzzing))]
-                        if !self.ignore_adler32
-                            && (self.bits.peek_bits(32) as u32).swap_bytes()
-                                != self.checksum.finish()
-                        {
-                            return Err(DecompressionError::WrongChecksum);
-                        }
-                        self.state = State::Done;
-                        self.bits.consume_bits(32);
-                        break;
-                    }
-                }
-                State::Done => unreachable!(),
-            }
-        }
-
-        if !self.ignore_adler32 && self.state != State::Done {
-            self.checksum.write(&output[output_position..output_index]);
-        }
-
-        if self.state == State::Done || !end_of_input || output_index == output.len() {
-            let input_left = remaining_input.len();
-            Ok((input.len() - input_left, output_index - output_position))
-        } else {
-            Err(DecompressionError::InsufficientInput)
-        }
-    }
-
-    /// Returns true if the decompressor has finished decompressing the input.
-    pub fn is_done(&self) -> bool {
-        self.state == State::Done
     }
 }
 
@@ -1197,7 +1192,7 @@ mod tests {
             eof_mask: 0,
             eof_bits: 0,
         };
-        Decompressor::build_tables(288, &FIXED_CODE_LENGTHS, &mut compression).unwrap();
+        compression.build_tables(288, &FIXED_CODE_LENGTHS).unwrap();
 
         assert_eq!(compression.litlen_table[..512], FIXED_LITLEN_TABLE);
         assert_eq!(compression.dist_table[..32], FIXED_DIST_TABLE);
