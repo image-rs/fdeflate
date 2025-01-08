@@ -87,8 +87,9 @@ pub(crate) const DIST_SYM_TO_DIST_BASE: [u16; 30] = [
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
 
-/// The main litlen_table uses a 12-bit input to lookup the meaning of the symbol. The table is
-/// split into 4 sections:
+/// By default the main litlen_table uses a 12-bit input to lookup the meaning of the symbol
+/// (`const`-generic parameters of `CompressedBlock` can ask for a non-default table size).
+/// The table entries have 4 possible flavours:
 ///
 ///   aaaaaaaa_bbbbbbbb_100000yy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
 ///   0000000z_zzzzzzzz_00000yyy_0000xxxx  x = input_advance_bits, y = extra_bits, z = distance_base (length)
@@ -120,7 +121,9 @@ pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
     entries
 };
 
-/// The distance table is a 512-entry table that maps 9 bits of distance symbols to their meaning.
+/// The distance table is by default a 512-entry table that maps 9 bits of distance symbols to
+/// their meaning.  (`const`-generic parameters of `CompressedBlock` can ask for a non-default
+/// table size).
 ///
 ///   00000000_00000000_00000000_00000000     symbol is more than 9 bits
 ///   zzzzzzzz_zzzzzzzz_0000yyyy_0000xxxx     x = input_advance_bits, y = extra_bits, z = distance_base
