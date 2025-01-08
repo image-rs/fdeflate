@@ -1,3 +1,4 @@
+use hc_matchfinder::HashChainMatchFinder;
 use simd_adler32::Adler32;
 use std::{
     collections::BinaryHeap,
@@ -8,6 +9,8 @@ use crate::tables::{
     BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_LEN_EXTRA,
     LENGTH_TO_SYMBOL,
 };
+
+mod hc_matchfinder;
 
 fn build_huffman_tree(
     frequencies: &[u32],
@@ -154,293 +157,236 @@ fn distance_to_dist_sym(distance: u16) -> u8 {
 fn compute_hash3(v: u32) -> u32 {
     (0x330698ecu64.wrapping_mul(((v & 0xff_ffff) ^ 0x2722_0a95) as u64) >> 16) as u32
 }
-fn compute_hash4(v: u64) -> u32 {
-    let mut hasher = fnv::FnvHasher::default();
-    std::hash::Hasher::write_u32(&mut hasher, v as u32);
-    std::hash::Hasher::finish(&hasher) as u32
-}
 fn compute_hash(v: u64) -> u32 {
     let mut hasher = fnv::FnvHasher::default();
     std::hash::Hasher::write_u64(&mut hasher, v);
     std::hash::Hasher::finish(&hasher) as u32
 }
 
-fn match_length(data: &[u8], anchor: usize, mut ip: usize, mut prev_index: usize) -> (u16, usize) {
-    assert!(
-        prev_index < ip,
-        "Match past current position: {prev_index} {ip}"
-    );
-
-    if data[ip] != data[prev_index] {
-        return (0, ip);
-    }
-
-    let mut length = 1;
-    while length < 258 && ip > anchor && prev_index > 0 && data[ip - 1] == data[prev_index - 1] {
-        length += 1;
-        ip -= 1;
-        prev_index -= 1;
-    }
-    while length < 258 && ip + length < data.len() && data[ip + length] == data[prev_index + length]
-    {
-        length += 1;
-    }
-    (length as u16, ip)
+enum Symbol {
+    LiteralRun {
+        start: u32,
+        end: u32,
+    },
+    Backref {
+        length: u16,
+        distance: u16,
+        dist_sym: u8,
+    },
 }
 
-const CACHE3_SIZE: usize = 1 << 15;
-const CACHE4_SIZE: usize = 1 << 15;
-const CACHE5_SIZE: usize = 1 << 18;
-const WINDOW_SIZE: usize = 32768;
-
-struct CacheTable {
-    hash3_table: Option<Box<[u32; CACHE3_SIZE]>>,
-    // hash4_table: Option<Box<[u32; CACHE4_SIZE]>>,
-    hash_table: Box<[u32; CACHE5_SIZE]>,
-    links: Box<[u32; WINDOW_SIZE]>,
-
-    search_depth: u16,
-
-    /// If we already have a match of this length, limit lazy search to a smaller search depth.
-    good_length: u16,
-
-    /// Stop searching for matches if the length is at least this long.
-    nice_length: u16,
-
-    /// Mask of low-bytes to consider for hashing.
-    hash_mask: u64,
+enum CompressorInner {
+    Stored,
+    Fast {
+        min_match: u8,
+        skip_ahead_shift: u8,
+        search_depth: u16,
+        nice_length: u16,
+    },
+    Slow {
+        search_depth: u16,
+        nice_length: u16,
+        max_lazy: u16,
+    },
 }
-impl CacheTable {
-    fn new(search_depth: u16, nice_length: u16, min_match: u8) -> Self {
-        assert!((3..=6).contains(&min_match));
-
-        Self {
-            hash3_table: (min_match == 3)
-                .then(|| vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
-            // hash4_table: (min_match <= 4)
-            //     .then(|| vec![0; CACHE4_SIZE].into_boxed_slice().try_into().unwrap()),
-            hash_table: vec![0; CACHE5_SIZE].into_boxed_slice().try_into().unwrap(),
-            links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
-            search_depth,
-            good_length: 32,
-            nice_length,
-            hash_mask: (1 << (min_match.max(4) * 8)) - 1,
-        }
-    }
-
-    fn get_and_insert(
+impl CompressorInner {
+    fn compress_data<W: Write>(
         &mut self,
+        writer: &mut BitWriter<W>,
         data: &[u8],
-        anchor: usize,
-        ip: usize,
-        value: u64,
-        min_match: u16,
-    ) -> (u16, u16, usize) {
-        let min_offset = ip.saturating_sub(32768).max(1);
+        eof: bool,
+    ) -> io::Result<()> {
+        match self {
+            Self::Stored => Self::compress_stored(writer, data, eof),
+            Self::Fast {
+                min_match,
+                skip_ahead_shift,
+                search_depth,
+                nice_length,
+            } => Self::compress_fast(
+                writer,
+                data,
+                *min_match,
+                *skip_ahead_shift,
+                *search_depth,
+                *nice_length,
+            ),
+            Self::Slow {
+                search_depth,
+                nice_length,
+                max_lazy,
+            } => {
+                todo!()
+            }
+        }
+    }
 
-        let mut best_offset = 0;
-        let mut best_length = min_match - 1;
-        let mut best_ip = 0;
-
-        let mut n = self.search_depth;
-        if min_match >= self.good_length {
-            n >>= 2;
+    fn compress_stored<W: Write>(
+        writer: &mut BitWriter<W>,
+        data: &[u8],
+        eof: bool,
+    ) -> io::Result<()> {
+        if data.is_empty() {
+            if eof {
+                // TODO: write empty final block
+            }
+            return Ok(());
         }
 
-        let hash = compute_hash(value & self.hash_mask);
-        let hash_index = (hash as usize) % CACHE5_SIZE;
-        let mut offset = self.hash_table[hash_index] as usize;
-
-        // Insert current value
-        self.hash_table[hash_index] = ip as u32;
-        self.links[ip % WINDOW_SIZE] = offset as u32;
-
-        // Visit previous matches
-        loop {
-            if offset < min_offset {
-                break;
+        let chunks = data.chunks(65535);
+        let last_chunk_index = chunks.len() - 1;
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            if i == last_chunk_index {
+                writer.write_bits(1, 3)?; // final block
+            } else {
+                writer.write_bits(0, 3)?; // non-final block
             }
-
-            let (length, start) = match_length(data, anchor, ip, offset);
-            if length > best_length {
-                best_length = length;
-                best_offset = offset as u32;
-                best_ip = start;
-            // } else if best_length > min_match {
-            //     break;
-            }
-            if length >= self.nice_length || ip + length as usize == data.len() {
-                break;
-            }
-
-            n -= 1;
-            if n == 0 {
-                break;
-            }
-
-            offset = self.links[offset % WINDOW_SIZE] as usize;
+            writer.flush()?;
+            writer
+                .writer
+                .write_all(&(chunk.len() as u16).to_le_bytes())?;
+            writer
+                .writer
+                .write_all(&(!(chunk.len() as u16)).to_le_bytes())?;
+            writer.writer.write_all(chunk)?;
         }
+        return Ok(());
+    }
 
-        // if let Some(hash4_table) = &mut self.hash4_table {
-        //     let hash4 = compute_hash4(value);
-        //     if best_length < 4 {
-        //         let hash4_offset = hash4_table[(hash4 as usize) % CACHE4_SIZE] as usize;
-        //         if hash4_offset >= ip.saturating_sub(8192).max(1) {
-        //             let (length, start) = match_length(data, anchor, ip, hash4_offset);
-        //             if length >= 4 {
-        //                 best_length = length;
-        //                 best_offset = hash4_offset as u32;
-        //                 best_ip = start;
-        //             }
-        //         }
-        //     }
-        //     hash4_table[(hash4 as usize) % CACHE4_SIZE] = ip as u32;
-        // }
-
-        if let Some(hash3_table) = &mut self.hash3_table {
-            let hash3 = compute_hash3(value as u32);
-            if best_length < min_match && min_match <= 3 {
-                let hash3_offset = hash3_table[(hash3 as usize) % CACHE3_SIZE] as usize;
-                if hash3_offset >= ip.saturating_sub(8192).max(1) {
-                    let (length, start) = match_length(data, anchor, ip, hash3_offset);
-                    if length >= 3 {
-                        best_length = length;
-                        best_offset = hash3_offset as u32;
-                        best_ip = start;
+    fn write_symbols<W: Write>(
+        writer: &mut BitWriter<W>,
+        data: &[u8],
+        symbols: &[Symbol],
+        eof: bool,
+    ) -> io::Result<()> {
+        let mut frequencies = [0u32; 286];
+        let mut dist_frequencies = [0u32; 30];
+        frequencies[256] = 1;
+        for symbol in symbols {
+            match symbol {
+                Symbol::LiteralRun { start, end } => {
+                    for lit in &data[*start as usize..*end as usize] {
+                        frequencies[*lit as usize] += 1;
                     }
                 }
+                Symbol::Backref {
+                    length, dist_sym, ..
+                } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    frequencies[sym] += 1;
+                    dist_frequencies[*dist_sym as usize] += 1;
+                }
             }
-            hash3_table[(hash3 as usize) % CACHE3_SIZE] = ip as u32;
         }
 
-        if best_length >= min_match {
-            return (
-                best_length as u16,
-                (ip - best_offset as usize) as u16,
-                best_ip,
-            );
+        let mut lengths = [0u8; 286];
+        let mut codes = [0u16; 286];
+        build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
+
+        let mut dist_lengths = [0u8; 30];
+        let mut dist_codes = [0u16; 30];
+        build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
+
+        if eof {
+            writer.write_bits(101, 3)?; // final block
+        } else {
+            writer.write_bits(100, 3)?; // non-final block
+        }
+        writer.write_bits(29, 5)?; // hlit
+        writer.write_bits(29, 5)?; // hdist
+        writer.write_bits(15, 4)?; // hclen
+
+        let mut code_length_frequencies = [0u32; 19];
+        for &length in &lengths {
+            code_length_frequencies[length as usize] += 1;
+        }
+        for &length in &dist_lengths {
+            code_length_frequencies[length as usize] += 1;
+        }
+        let mut code_length_lengths = [0u8; 19];
+        let mut code_length_codes = [0u16; 19];
+        build_huffman_tree(
+            &code_length_frequencies,
+            &mut code_length_lengths,
+            &mut code_length_codes,
+            7,
+        );
+
+        for j in 0..19 {
+            writer.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
         }
 
-        (0, 0, ip)
-    }
-
-    fn insert(&mut self, value: u64, offset: usize) {
-        // if let Some(hash4_table) = &mut self.hash4_table {
-        //     let hash4 = compute_hash4(value);
-        //     hash4_table[(hash4 as usize) % CACHE4_SIZE] = offset as u32;
-        // }
-
-        if let Some(hash3_table) = &mut self.hash3_table {
-            let hash3 = compute_hash3(value as u32);
-            hash3_table[(hash3 as usize) % CACHE3_SIZE] = offset as u32;
+        for &length in lengths.iter().chain(&dist_lengths) {
+            writer.write_bits(
+                code_length_codes[length as usize] as u64,
+                code_length_lengths[length as usize],
+            )?;
         }
 
-        let hash = compute_hash(value & self.hash_mask);
-        let prev_offset = self.hash_table[(hash as usize) % CACHE5_SIZE];
-        self.hash_table[(hash as usize) % CACHE5_SIZE] = offset as u32;
-        self.links[offset as usize % WINDOW_SIZE] = prev_offset;
-    }
-}
+        for symbol in symbols {
+            match symbol {
+                Symbol::LiteralRun { start, end } => {
+                    let mut groups = data[*start as usize..*end as usize].chunks_exact(4);
+                    for group in &mut groups {
+                        let code0 = codes[group[0] as usize] as u64;
+                        let code1 = codes[group[1] as usize] as u64;
+                        let code2 = codes[group[2] as usize] as u64;
+                        let code3 = codes[group[3] as usize] as u64;
 
-/// Compressor that produces fdeflate compressed streams.
-pub struct Compressor<W: Write> {
-    checksum: Adler32,
-    buffer: u64,
-    nbits: u8,
-    writer: W,
-    pending: Vec<u8>,
+                        let len0 = lengths[group[0] as usize];
+                        let len1 = lengths[group[1] as usize];
+                        let len2 = lengths[group[2] as usize];
+                        let len3 = lengths[group[3] as usize];
 
-    min_match: u8,
-    skip_ahead_shift: u8,
-    search_depth: u16,
-    nice_length: u16,
-    max_lazy: u16,
-}
-impl<W: Write> Compressor<W> {
-    fn write_bits(&mut self, bits: u64, nbits: u8) -> io::Result<()> {
-        debug_assert!(nbits <= 64);
+                        writer.write_bits(
+                            code0
+                                | (code1 << len0)
+                                | (code2 << (len0 + len1))
+                                | (code3 << (len0 + len1 + len2)),
+                            len0 + len1 + len2 + len3,
+                        )?;
+                    }
 
-        self.buffer |= bits << self.nbits;
-        self.nbits += nbits;
+                    for &lit in groups.remainder() {
+                        writer
+                            .write_bits(codes[lit as usize] as u64, lengths[lit as usize] as u8)?;
+                    }
+                }
+                Symbol::Backref {
+                    length,
+                    distance,
+                    dist_sym,
+                } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    writer.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                    let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
+                    let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
+                    writer.write_bits(extra, len_extra)?;
 
-        if self.nbits >= 64 {
-            self.writer.write_all(&self.buffer.to_le_bytes())?;
-            self.nbits -= 64;
-            self.buffer = bits.checked_shr((nbits - self.nbits) as u32).unwrap_or(0);
+                    writer.write_bits(
+                        dist_codes[*dist_sym as usize] as u64,
+                        dist_lengths[*dist_sym as usize],
+                    )?;
+                    let dist_extra = DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize];
+                    let extra = *distance - DIST_SYM_TO_DIST_BASE[*dist_sym as usize];
+
+                    writer.write_bits(extra as u64, dist_extra)?;
+                }
+            }
         }
-        debug_assert!(self.nbits < 64);
+        writer.write_bits(codes[256] as u64, lengths[256])?;
         Ok(())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        if self.nbits % 8 != 0 {
-            self.write_bits(0, 8 - self.nbits % 8)?;
-        }
-        if self.nbits > 0 {
-            self.writer
-                .write_all(&self.buffer.to_le_bytes()[..self.nbits as usize / 8])
-                .unwrap();
-            self.buffer = 0;
-            self.nbits = 0;
-        }
-        Ok(())
-    }
-
-    /// Create a new Compressor.
-    pub fn new(writer: W) -> io::Result<Self> {
-        let mut compressor = Self {
-            checksum: Adler32::new(),
-            buffer: 0,
-            nbits: 0,
-            writer,
-            pending: Vec::new(),
-
-            min_match: 6,
-            search_depth: 300,
-            nice_length: 16,
-            skip_ahead_shift: 3,
-            max_lazy: 0,
-        };
-        compressor.write_headers()?;
-        Ok(compressor)
-    }
-
-    fn write_headers(&mut self) -> io::Result<()> {
-        const HEADER: [u8; 54] = [
-            120, 1, 237, 192, 3, 160, 36, 89, 150, 198, 241, 255, 119, 238, 141, 200, 204, 167,
-            114, 75, 99, 174, 109, 219, 182, 109, 219, 182, 109, 219, 182, 109, 105, 140, 158, 150,
-            74, 175, 158, 50, 51, 34, 238, 249, 118, 183, 106, 122, 166, 135, 59, 107, 213, 15,
-        ];
-        self.writer.write_all(&HEADER[..2]).unwrap();
-        //self.write_bits(HEADER[53] as u64, 5)?;
-
-        Ok(())
-    }
-
-    /// Write data to the compressor.
-    pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
-        self.checksum.write(data);
-        self.pending.extend_from_slice(data);
-        Ok(())
-    }
-
-    /// Write the remainder of the stream and return the inner writer.
-    pub fn finish(mut self) -> io::Result<W> {
-        let data = std::mem::take(&mut self.pending);
-
-        enum Symbol {
-            LiteralRun {
-                start: u32,
-                end: u32,
-            },
-            Backref {
-                length: u16,
-                distance: u16,
-                dist_sym: u8,
-            },
-        }
-
-        let mut matches = CacheTable::new(self.search_depth, self.nice_length, self.min_match);
+    fn compress_fast<W: Write>(
+        writer: &mut BitWriter<W>,
+        data: &[u8],
+        min_match: u8,
+        skip_ahead_shift: u8,
+        search_depth: u16,
+        nice_length: u16,
+    ) -> io::Result<()> {
+        let mut matches = HashChainMatchFinder::new(search_depth, nice_length, min_match);
         let mut ip = 0;
 
         let mut length = 0;
@@ -492,23 +438,23 @@ impl<W: Write> Compressor<W> {
                 }
 
                 if length >= 3 {
-                    if match_start + length as usize > ip + 1
-                        && length < self.max_lazy
-                        && ip + length as usize + 9 <= data.len()
-                    {
-                        ip += 1;
-                        let (next_length, next_distance, next_match_start) =
-                            matches.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
-                        if next_length > 0 && match_start + 1 >= next_match_start {
-                            distance = next_distance;
-                            length = next_length;
-                            match_start = next_match_start;
+                    // if match_start + length as usize > ip + 1
+                    //     && length < max_lazy
+                    //     && ip + length as usize + 9 <= data.len()
+                    // {
+                    //     ip += 1;
+                    //     let (next_length, next_distance, next_match_start) =
+                    //         matches.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
+                    //     if next_length > 0 && match_start + 1 >= next_match_start {
+                    //         distance = next_distance;
+                    //         length = next_length;
+                    //         match_start = next_match_start;
 
-                            if next_match_start > match_start {
-                                continue;
-                            }
-                        }
-                    }
+                    //         if next_match_start > match_start {
+                    //             continue;
+                    //         }
+                    //     }
+                    // }
                     assert!(last_match <= match_start);
 
                     symbols.push(Symbol::LiteralRun {
@@ -551,7 +497,7 @@ impl<W: Write> Compressor<W> {
 
                 // If we haven't found a match in a while, start skipping ahead by emitting multiple
                 // literals at once.
-                ip += 1 + ((ip - last_match) >> self.skip_ahead_shift);
+                ip += 1 + ((ip - last_match) >> skip_ahead_shift);
             }
             if data.len() < ip + 8 {
                 symbols.push(Symbol::LiteralRun {
@@ -561,135 +507,129 @@ impl<W: Write> Compressor<W> {
                 ip = data.len();
             }
 
-            let mut frequencies = [0u32; 286];
-            let mut dist_frequencies = [0u32; 30];
-            frequencies[256] = 1;
-            for symbol in &symbols {
-                match symbol {
-                    Symbol::LiteralRun { start, end } => {
-                        for lit in &data[*start as usize..*end as usize] {
-                            frequencies[*lit as usize] += 1;
-                        }
-                    }
-                    Symbol::Backref {
-                        length, dist_sym, ..
-                    } => {
-                        let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
-                        frequencies[sym] += 1;
-                        dist_frequencies[*dist_sym as usize] += 1;
-                    }
-                }
-            }
-
-            let mut lengths = [0u8; 286];
-            let mut codes = [0u16; 286];
-            build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
-
-            let mut dist_lengths = [0u8; 30];
-            let mut dist_codes = [0u16; 30];
-            build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
-
-            if ip == data.len() {
-                self.write_bits(101, 3)?; // final block
-            } else {
-                self.write_bits(100, 3)?; // non-final block
-            }
-            self.write_bits(29, 5)?; // hlit
-            self.write_bits(29, 5)?; // hdist
-            self.write_bits(15, 4)?; // hclen
-
-            let mut code_length_frequencies = [0u32; 19];
-            for &length in &lengths {
-                code_length_frequencies[length as usize] += 1;
-            }
-            for &length in &dist_lengths {
-                code_length_frequencies[length as usize] += 1;
-            }
-            let mut code_length_lengths = [0u8; 19];
-            let mut code_length_codes = [0u16; 19];
-            build_huffman_tree(
-                &code_length_frequencies,
-                &mut code_length_lengths,
-                &mut code_length_codes,
-                7,
-            );
-
-            for j in 0..19 {
-                self.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
-            }
-
-            for &length in lengths.iter().chain(&dist_lengths) {
-                self.write_bits(
-                    code_length_codes[length as usize] as u64,
-                    code_length_lengths[length as usize],
-                )?;
-            }
-
-            for symbol in &symbols {
-                match symbol {
-                    Symbol::LiteralRun { start, end } => {
-                        let mut groups = data[*start as usize..*end as usize].chunks_exact(4);
-                        for group in &mut groups {
-                            let code0 = codes[group[0] as usize] as u64;
-                            let code1 = codes[group[1] as usize] as u64;
-                            let code2 = codes[group[2] as usize] as u64;
-                            let code3 = codes[group[3] as usize] as u64;
-
-                            let len0 = lengths[group[0] as usize];
-                            let len1 = lengths[group[1] as usize];
-                            let len2 = lengths[group[2] as usize];
-                            let len3 = lengths[group[3] as usize];
-
-                            self.write_bits(
-                                code0
-                                    | (code1 << len0)
-                                    | (code2 << (len0 + len1))
-                                    | (code3 << (len0 + len1 + len2)),
-                                len0 + len1 + len2 + len3,
-                            )?;
-                        }
-
-                        for &lit in groups.remainder() {
-                            self.write_bits(
-                                codes[lit as usize] as u64,
-                                lengths[lit as usize] as u8,
-                            )?;
-                        }
-                    }
-                    Symbol::Backref {
-                        length,
-                        distance,
-                        dist_sym,
-                    } => {
-                        let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
-                        self.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
-                        let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
-                        let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
-                        self.write_bits(extra, len_extra)?;
-
-                        self.write_bits(
-                            dist_codes[*dist_sym as usize] as u64,
-                            dist_lengths[*dist_sym as usize],
-                        )?;
-                        let dist_extra = DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize];
-                        let extra = *distance - DIST_SYM_TO_DIST_BASE[*dist_sym as usize];
-
-                        self.write_bits(extra as u64, dist_extra)?;
-                    }
-                }
-            }
-            self.write_bits(codes[256] as u64, lengths[256])?;
+            Self::write_symbols(writer, data, &symbols, ip == data.len())?;
         }
 
+        Ok(())
+    }
+}
+
+const WINDOW_SIZE: usize = 32768;
+
+struct BitWriter<W: Write> {
+    buffer: u64,
+    nbits: u8,
+    writer: W,
+}
+impl<W: Write> BitWriter<W> {
+    fn write_bits(&mut self, bits: u64, nbits: u8) -> io::Result<()> {
+        debug_assert!(nbits <= 64);
+
+        self.buffer |= bits << self.nbits;
+        self.nbits += nbits;
+
+        if self.nbits >= 64 {
+            self.writer.write_all(&self.buffer.to_le_bytes())?;
+            self.nbits -= 64;
+            self.buffer = bits.checked_shr((nbits - self.nbits) as u32).unwrap_or(0);
+        }
+        debug_assert!(self.nbits < 64);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.nbits % 8 != 0 {
+            self.write_bits(0, 8 - self.nbits % 8)?;
+        }
+        if self.nbits > 0 {
+            self.writer
+                .write_all(&self.buffer.to_le_bytes()[..self.nbits as usize / 8])
+                .unwrap();
+            self.buffer = 0;
+            self.nbits = 0;
+        }
+        Ok(())
+    }
+}
+
+/// Compressor that produces fdeflate compressed streams.
+pub struct Compressor<W: Write> {
+    checksum: Adler32,
+    pending: Vec<u8>,
+    bit_writer: BitWriter<W>,
+    inner: CompressorInner,
+}
+impl<W: Write> Compressor<W> {
+    /// Create a new Compressor.
+    pub fn new(mut writer: W) -> io::Result<Self> {
+        writer.write_all(&[0x78, 0x01])?; // zlib header
+
+        let inner = match 1 {
+            0 => CompressorInner::Stored,
+            _ => CompressorInner::Fast {
+                min_match: 4,
+                skip_ahead_shift: 3,
+                search_depth: 80,
+                nice_length: 16,
+            },
+        };
+
+        Ok(Self {
+            checksum: Adler32::new(),
+            bit_writer: BitWriter {
+                buffer: 0,
+                nbits: 0,
+                writer,
+            },
+            pending: Vec::new(),
+            inner,
+        })
+    }
+
+    /// Write data to the compressor.
+    pub fn write_data(&mut self, mut data: &[u8]) -> io::Result<()> {
+        self.checksum.write(data);
+
+        // Feed the data into the compressor in 1 MB chunks.
+        const CHUNK_SIZE: usize = 1 << 20;
+        while !data.is_empty() {
+            if self.pending.is_empty() && data.len() >= CHUNK_SIZE {
+                self.inner
+                    .compress_data(&mut self.bit_writer, &data[..CHUNK_SIZE], false)?;
+                data = &data[CHUNK_SIZE..];
+                continue;
+            }
+
+            if data.len() + self.pending.len() < CHUNK_SIZE {
+                self.pending.extend_from_slice(data);
+                break;
+            }
+
+            let remaining = CHUNK_SIZE - self.pending.len();
+            self.pending.extend_from_slice(&data[..remaining]);
+            self.inner
+                .compress_data(&mut self.bit_writer, &self.pending, false)?;
+            self.pending.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Write the remainder of the stream and return the inner writer.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.inner
+            .compress_data(&mut self.bit_writer, &self.pending, true)?;
+
         // Write end of block
-        self.flush()?;
+        self.bit_writer.flush()?;
 
         // Write Adler32 checksum
         let checksum: u32 = self.checksum.finish();
-        self.writer
+        self.bit_writer
+            .writer
             .write_all(checksum.to_be_bytes().as_ref())
             .unwrap();
-        Ok(self.writer)
+        Ok(self.bit_writer.writer)
     }
 }
 
