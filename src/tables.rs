@@ -87,8 +87,9 @@ pub(crate) const DIST_SYM_TO_DIST_BASE: [u16; 30] = [
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
 
-/// The main litlen_table uses a 12-bit input to lookup the meaning of the symbol. The table is
-/// split into 4 sections:
+/// By default the main litlen_table uses a 12-bit input to lookup the meaning of the symbol
+/// (`const`-generic parameters of `CompressedBlock` can ask for a non-default table size).
+/// The table entries have 4 possible flavours:
 ///
 ///   aaaaaaaa_bbbbbbbb_100000yy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
 ///   0000000z_zzzzzzzz_00000yyy_0000xxxx  x = input_advance_bits, y = extra_bits, z = distance_base (length)
@@ -103,7 +104,7 @@ pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
         // 00000000_iiiiiiii_10000001_0000???? (? = will be filled by huffman::build_table)
         // aaaaaaaa_bbbbbbbb_100000yy_0000xxxx
         // x = input_advance_bits, y = output_advance_bytes (literal)
-        entries[i] = (i as u32) << 16 | LITERAL_ENTRY | (1 << 8);
+        entries[i] = ((i as u32) << 16) | LITERAL_ENTRY | (1 << 8);
         i += 1;
     }
 
@@ -113,14 +114,16 @@ pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
         // 0000000z_zzzzzzzz_00000yyy_0000???? (? = will be filled by huffman::build_table)
         // 0000000z_zzzzzzzz_00000yyy_0000xxxx
         // x = input_advance_bits, y = extra_bits, z = distance_base (length)
-        entries[i] = (LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16
-            | (LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8;
+        entries[i] = ((LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16)
+            | ((LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8);
         i += 1;
     }
     entries
 };
 
-/// The distance table is a 512-entry table that maps 9 bits of distance symbols to their meaning.
+/// The distance table is by default a 512-entry table that maps 9 bits of distance symbols to
+/// their meaning.  (`const`-generic parameters of `CompressedBlock` can ask for a non-default
+/// table size).
 ///
 ///   00000000_00000000_00000000_00000000     symbol is more than 9 bits
 ///   zzzzzzzz_zzzzzzzz_0000yyyy_0000xxxx     x = input_advance_bits, y = extra_bits, z = distance_base
@@ -128,8 +131,8 @@ pub(crate) const DISTANCE_TABLE_ENTRIES: [u32; 32] = {
     let mut entries = [0; 32];
     let mut i = 0;
     while i < 30 {
-        entries[i] = (DIST_SYM_TO_DIST_BASE[i] as u32) << 16
-            | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8
+        entries[i] = ((DIST_SYM_TO_DIST_BASE[i] as u32) << 16)
+            | ((DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8)
             | LITERAL_ENTRY;
         i += 1;
     }
