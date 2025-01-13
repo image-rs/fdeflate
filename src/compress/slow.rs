@@ -17,13 +17,13 @@ pub(super) struct SlowCompressor {
 impl SlowCompressor {
     pub fn new() -> Self {
         Self {
-            match_finder: BTreeMatchFinder::new(4),
+            match_finder: BTreeMatchFinder::new(3),
 
             min_match: 4,
-            skip_ahead_shift: 9,
+            skip_ahead_shift: 19,
             search_depth: 64,
             nice_length: 258,
-            max_lazy: 16,
+            max_lazy: 32,
         }
     }
 
@@ -38,7 +38,7 @@ impl SlowCompressor {
             let mut symbols = Vec::new();
 
             let mut last_match = ip;
-            'outer: while symbols.len() < 16384 && ip + 16 < data.len() {
+            'outer: while symbols.len() < 16384 && ip + 8 < data.len() {
                 let current = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
 
                 if length == 0 {
@@ -91,6 +91,7 @@ impl SlowCompressor {
                             distance = next_distance;
                             length = next_length;
                             match_start = next_match_start;
+                            continue;
                         }
                     }
                     assert!(last_match <= match_start);
@@ -137,7 +138,7 @@ impl SlowCompressor {
                 // literals at once.
                 ip += 1 + ((ip - last_match) >> self.skip_ahead_shift);
             }
-            if data.len() <= ip + 16 {
+            if data.len() <= ip + 8 {
                 symbols.push(Symbol::LiteralRun {
                     start: last_match as u32,
                     end: data.len() as u32,

@@ -49,8 +49,8 @@ impl BTreeMatchFinder {
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
-            search_depth: 500,
-            early_return_length: 16,
+            search_depth: 15000,
+            early_return_length: 64,
         }
     }
 
@@ -102,11 +102,10 @@ impl BTreeMatchFinder {
         let mut best_right_length = 0;
         let mut length = 0;
 
-        // println!("---");
         // Visit previous matches
+        // eprintln!("---");
         let mut depth_remaining = self.search_depth;
         loop {
-            length=0;
             if data[ip + length] == data[offset + length] {
                 while length < 258
                     && ip + length < data.len()
@@ -115,29 +114,28 @@ impl BTreeMatchFinder {
                     length += 1;
                 }
 
-                // if length == 258 {
-                //     println!("length=258");
-                // }
-                // if ip + length + 1 >= data.len() {
-                //     println!("at end");
+                // for i in 0..length.min(self.early_return_length) {
+                //     assert_eq!(
+                //         data[ip + i],
+                //         data[offset + i],
+                //         "{i} {length} ip={ip} data_len={}",
+                //         data.len()
+                //     );
                 // }
 
-                for i in 0..length.min(self.early_return_length) {
-                    assert_eq!(data[ip + i], data[offset + i], "{i} {length} {depth_remaining} {offset} {min_offset}");
+                if record_matches && length > best_length as usize {
+                    best_length = length as u16;
+                    best_offset = offset as u32;
                 }
 
-                if !record_matches || length > best_length as usize {
-                    if record_matches {
-                        best_length = length as u16;
-                        best_offset = offset as u32;
-                    }
-                    if length >= self.early_return_length || ip + length == data.len() {
-                        self.child_links[pending_left] = self.child_links[left_child(offset)];
-                        self.child_links[pending_right] = self.child_links[right_child(offset)];
-                        break;
-                    }
+                if length >= self.early_return_length || ip + length == data.len() {
+                    self.child_links[pending_left] = self.child_links[left_child(offset)];
+                    self.child_links[pending_right] = self.child_links[right_child(offset)];
+                    break;
                 }
             }
+
+            assert!(ip + length < data.len());
 
             if data[offset + length] < data[ip + length] {
                 self.child_links[pending_left] = offset as u32;
@@ -149,9 +147,15 @@ impl BTreeMatchFinder {
                     length = best_right_length;
                 }
                 // length = length.min(best_right_length);
-                // println!("left {best_right_length},{best_left_length}");
+                // eprintln!(
+                //     "left {best_right_length},{best_left_length} dist={}",
+                //     ip - offset
+                // );
             } else {
-                assert!(data[offset + length] > data[ip + length], "{length} {depth_remaining} {offset} {min_offset}");
+                assert!(
+                    data[offset + length] > data[ip + length],
+                    "{length} {depth_remaining} {offset} {min_offset}"
+                );
 
                 self.child_links[pending_right] = offset as u32;
                 pending_right = left_child(offset);
@@ -162,11 +166,14 @@ impl BTreeMatchFinder {
                     length = best_left_length;
                 }
                 // length = length.min(best_left_length);
-                // println!("right {best_right_length},{best_left_length}");
+                // eprintln!(
+                //     "right {best_right_length},{best_left_length} dist={}",
+                //     ip - offset
+                // );
             }
 
             depth_remaining -= 1;
-            if offset < min_offset || depth_remaining == 0 {
+            if offset <= min_offset || depth_remaining == 0 {
                 self.child_links[pending_left] = 0;
                 self.child_links[pending_right] = 0;
                 break;
