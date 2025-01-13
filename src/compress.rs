@@ -1,5 +1,7 @@
+use fast::FastCompressor;
 use hc_matchfinder::HashChainMatchFinder;
 use simd_adler32::Adler32;
+use slow::SlowCompressor;
 use std::{
     collections::BinaryHeap,
     io::{self, Seek, SeekFrom, Write},
@@ -10,7 +12,11 @@ use crate::tables::{
     LENGTH_TO_SYMBOL,
 };
 
+mod bt_matchfinder;
 mod hc_matchfinder;
+
+mod fast;
+mod slow;
 
 fn build_huffman_tree(
     frequencies: &[u32],
@@ -175,19 +181,134 @@ enum Symbol {
     },
 }
 
+fn write_block<W: Write>(
+    writer: &mut BitWriter<W>,
+    data: &[u8],
+    symbols: &[Symbol],
+    eof: bool,
+) -> io::Result<()> {
+    let mut frequencies = [0u32; 286];
+    let mut dist_frequencies = [0u32; 30];
+    frequencies[256] = 1;
+    for symbol in symbols {
+        match symbol {
+            Symbol::LiteralRun { start, end } => {
+                for lit in &data[*start as usize..*end as usize] {
+                    frequencies[*lit as usize] += 1;
+                }
+            }
+            Symbol::Backref {
+                length, dist_sym, ..
+            } => {
+                let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                frequencies[sym] += 1;
+                dist_frequencies[*dist_sym as usize] += 1;
+            }
+        }
+    }
+
+    let mut lengths = [0u8; 286];
+    let mut codes = [0u16; 286];
+    build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
+
+    let mut dist_lengths = [0u8; 30];
+    let mut dist_codes = [0u16; 30];
+    build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
+
+    if eof {
+        writer.write_bits(101, 3)?; // final block
+    } else {
+        writer.write_bits(100, 3)?; // non-final block
+    }
+    writer.write_bits(29, 5)?; // hlit
+    writer.write_bits(29, 5)?; // hdist
+    writer.write_bits(15, 4)?; // hclen
+
+    let mut code_length_frequencies = [0u32; 19];
+    for &length in &lengths {
+        code_length_frequencies[length as usize] += 1;
+    }
+    for &length in &dist_lengths {
+        code_length_frequencies[length as usize] += 1;
+    }
+    let mut code_length_lengths = [0u8; 19];
+    let mut code_length_codes = [0u16; 19];
+    build_huffman_tree(
+        &code_length_frequencies,
+        &mut code_length_lengths,
+        &mut code_length_codes,
+        7,
+    );
+
+    for j in 0..19 {
+        writer.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
+    }
+
+    for &length in lengths.iter().chain(&dist_lengths) {
+        writer.write_bits(
+            code_length_codes[length as usize] as u64,
+            code_length_lengths[length as usize],
+        )?;
+    }
+
+    for symbol in symbols {
+        match symbol {
+            Symbol::LiteralRun { start, end } => {
+                let mut groups = data[*start as usize..*end as usize].chunks_exact(4);
+                for group in &mut groups {
+                    let code0 = codes[group[0] as usize] as u64;
+                    let code1 = codes[group[1] as usize] as u64;
+                    let code2 = codes[group[2] as usize] as u64;
+                    let code3 = codes[group[3] as usize] as u64;
+
+                    let len0 = lengths[group[0] as usize];
+                    let len1 = lengths[group[1] as usize];
+                    let len2 = lengths[group[2] as usize];
+                    let len3 = lengths[group[3] as usize];
+
+                    writer.write_bits(
+                        code0
+                            | (code1 << len0)
+                            | (code2 << (len0 + len1))
+                            | (code3 << (len0 + len1 + len2)),
+                        len0 + len1 + len2 + len3,
+                    )?;
+                }
+
+                for &lit in groups.remainder() {
+                    writer.write_bits(codes[lit as usize] as u64, lengths[lit as usize] as u8)?;
+                }
+            }
+            Symbol::Backref {
+                length,
+                distance,
+                dist_sym,
+            } => {
+                let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                writer.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
+                let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
+                writer.write_bits(extra, len_extra)?;
+
+                writer.write_bits(
+                    dist_codes[*dist_sym as usize] as u64,
+                    dist_lengths[*dist_sym as usize],
+                )?;
+                let dist_extra = DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize];
+                let extra = *distance - DIST_SYM_TO_DIST_BASE[*dist_sym as usize];
+
+                writer.write_bits(extra as u64, dist_extra)?;
+            }
+        }
+    }
+    writer.write_bits(codes[256] as u64, lengths[256])?;
+    Ok(())
+}
+
 enum CompressorInner {
     Stored,
-    Fast {
-        min_match: u8,
-        skip_ahead_shift: u8,
-        search_depth: u16,
-        nice_length: u16,
-    },
-    Slow {
-        search_depth: u16,
-        nice_length: u16,
-        max_lazy: u16,
-    },
+    Fast(FastCompressor),
+    Slow(SlowCompressor),
 }
 impl CompressorInner {
     fn compress_data<W: Write>(
@@ -198,26 +319,8 @@ impl CompressorInner {
     ) -> io::Result<()> {
         match self {
             Self::Stored => Self::compress_stored(writer, data, eof),
-            Self::Fast {
-                min_match,
-                skip_ahead_shift,
-                search_depth,
-                nice_length,
-            } => Self::compress_fast(
-                writer,
-                data,
-                *min_match,
-                *skip_ahead_shift,
-                *search_depth,
-                *nice_length,
-            ),
-            Self::Slow {
-                search_depth,
-                nice_length,
-                max_lazy,
-            } => {
-                todo!()
-            }
+            Self::Fast(inner) => inner.compress(writer, data),
+            Self::Slow(inner) => inner.compress(writer, data),
         }
     }
 
@@ -251,266 +354,6 @@ impl CompressorInner {
             writer.writer.write_all(chunk)?;
         }
         return Ok(());
-    }
-
-    fn write_symbols<W: Write>(
-        writer: &mut BitWriter<W>,
-        data: &[u8],
-        symbols: &[Symbol],
-        eof: bool,
-    ) -> io::Result<()> {
-        let mut frequencies = [0u32; 286];
-        let mut dist_frequencies = [0u32; 30];
-        frequencies[256] = 1;
-        for symbol in symbols {
-            match symbol {
-                Symbol::LiteralRun { start, end } => {
-                    for lit in &data[*start as usize..*end as usize] {
-                        frequencies[*lit as usize] += 1;
-                    }
-                }
-                Symbol::Backref {
-                    length, dist_sym, ..
-                } => {
-                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
-                    frequencies[sym] += 1;
-                    dist_frequencies[*dist_sym as usize] += 1;
-                }
-            }
-        }
-
-        let mut lengths = [0u8; 286];
-        let mut codes = [0u16; 286];
-        build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
-
-        let mut dist_lengths = [0u8; 30];
-        let mut dist_codes = [0u16; 30];
-        build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
-
-        if eof {
-            writer.write_bits(101, 3)?; // final block
-        } else {
-            writer.write_bits(100, 3)?; // non-final block
-        }
-        writer.write_bits(29, 5)?; // hlit
-        writer.write_bits(29, 5)?; // hdist
-        writer.write_bits(15, 4)?; // hclen
-
-        let mut code_length_frequencies = [0u32; 19];
-        for &length in &lengths {
-            code_length_frequencies[length as usize] += 1;
-        }
-        for &length in &dist_lengths {
-            code_length_frequencies[length as usize] += 1;
-        }
-        let mut code_length_lengths = [0u8; 19];
-        let mut code_length_codes = [0u16; 19];
-        build_huffman_tree(
-            &code_length_frequencies,
-            &mut code_length_lengths,
-            &mut code_length_codes,
-            7,
-        );
-
-        for j in 0..19 {
-            writer.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
-        }
-
-        for &length in lengths.iter().chain(&dist_lengths) {
-            writer.write_bits(
-                code_length_codes[length as usize] as u64,
-                code_length_lengths[length as usize],
-            )?;
-        }
-
-        for symbol in symbols {
-            match symbol {
-                Symbol::LiteralRun { start, end } => {
-                    let mut groups = data[*start as usize..*end as usize].chunks_exact(4);
-                    for group in &mut groups {
-                        let code0 = codes[group[0] as usize] as u64;
-                        let code1 = codes[group[1] as usize] as u64;
-                        let code2 = codes[group[2] as usize] as u64;
-                        let code3 = codes[group[3] as usize] as u64;
-
-                        let len0 = lengths[group[0] as usize];
-                        let len1 = lengths[group[1] as usize];
-                        let len2 = lengths[group[2] as usize];
-                        let len3 = lengths[group[3] as usize];
-
-                        writer.write_bits(
-                            code0
-                                | (code1 << len0)
-                                | (code2 << (len0 + len1))
-                                | (code3 << (len0 + len1 + len2)),
-                            len0 + len1 + len2 + len3,
-                        )?;
-                    }
-
-                    for &lit in groups.remainder() {
-                        writer
-                            .write_bits(codes[lit as usize] as u64, lengths[lit as usize] as u8)?;
-                    }
-                }
-                Symbol::Backref {
-                    length,
-                    distance,
-                    dist_sym,
-                } => {
-                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
-                    writer.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
-                    let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
-                    let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
-                    writer.write_bits(extra, len_extra)?;
-
-                    writer.write_bits(
-                        dist_codes[*dist_sym as usize] as u64,
-                        dist_lengths[*dist_sym as usize],
-                    )?;
-                    let dist_extra = DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize];
-                    let extra = *distance - DIST_SYM_TO_DIST_BASE[*dist_sym as usize];
-
-                    writer.write_bits(extra as u64, dist_extra)?;
-                }
-            }
-        }
-        writer.write_bits(codes[256] as u64, lengths[256])?;
-        Ok(())
-    }
-
-    fn compress_fast<W: Write>(
-        writer: &mut BitWriter<W>,
-        data: &[u8],
-        min_match: u8,
-        skip_ahead_shift: u8,
-        search_depth: u16,
-        nice_length: u16,
-    ) -> io::Result<()> {
-        let mut matches = HashChainMatchFinder::new(search_depth, nice_length, min_match);
-        let mut ip = 0;
-
-        let mut length = 0;
-        let mut distance = 0;
-        let mut match_start = 0;
-
-        while ip < data.len() {
-            let mut symbols = Vec::new();
-
-            let mut last_match = ip;
-            'outer: while symbols.len() < 16384 && ip + 8 <= data.len() {
-                let current = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
-
-                if length == 0 {
-                    if current == 0 {
-                        while ip > last_match && data[ip - 1] == 0 {
-                            ip -= 1;
-                        }
-
-                        if ip == 0 || data[ip - 1] != 0 {
-                            ip += 1;
-                        }
-
-                        symbols.push(Symbol::LiteralRun {
-                            start: last_match as u32,
-                            end: ip as u32,
-                        });
-
-                        let mut run_length = 0;
-                        while ip < data.len() && data[ip] == 0 && run_length < 258 {
-                            run_length += 1;
-                            ip += 1;
-                        }
-
-                        symbols.push(Symbol::Backref {
-                            length: run_length as u16,
-                            distance: 1,
-                            dist_sym: 0,
-                        });
-
-                        last_match = ip;
-
-                        length = 0;
-                        continue;
-                    }
-
-                    (length, distance, match_start) =
-                        matches.get_and_insert(&data, last_match, ip, current, 3);
-                }
-
-                if length >= 3 {
-                    // if match_start + length as usize > ip + 1
-                    //     && length < max_lazy
-                    //     && ip + length as usize + 9 <= data.len()
-                    // {
-                    //     ip += 1;
-                    //     let (next_length, next_distance, next_match_start) =
-                    //         matches.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
-                    //     if next_length > 0 && match_start + 1 >= next_match_start {
-                    //         distance = next_distance;
-                    //         length = next_length;
-                    //         match_start = next_match_start;
-
-                    //         if next_match_start > match_start {
-                    //             continue;
-                    //         }
-                    //     }
-                    // }
-                    assert!(last_match <= match_start);
-
-                    symbols.push(Symbol::LiteralRun {
-                        start: last_match as u32,
-                        end: match_start as u32,
-                    });
-
-                    symbols.push(Symbol::Backref {
-                        length: length as u16,
-                        distance,
-                        dist_sym: distance_to_dist_sym(distance),
-                    });
-
-                    let match_end = match_start + length as usize;
-                    let insert_end = (match_end - 2).min(data.len() - 8);
-                    let insert_start = (ip + 1).max(insert_end.saturating_sub(16));
-                    for j in (insert_start..insert_end).step_by(3) {
-                        let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                        matches.insert(v, j);
-                        matches.insert(v >> 8, j + 1);
-                        matches.insert(v >> 16, j + 2);
-                    }
-
-                    // if insert_end >= insert_start + 3 {
-                    //     let v = u64::from_le_bytes(data[insert_end - 3..][..8].try_into().unwrap());
-                    //     matches.insert(v, insert_end - 3);
-                    //     matches.insert(v >> 8, insert_end - 2);
-                    //     matches.insert(v >> 16, insert_end - 1);
-                    // }
-
-                    ip = match_end;
-                    last_match = ip;
-
-                    length = 0;
-                    continue 'outer;
-                }
-
-                // matches.insert(current >> 8, ip + 1);
-                // matches.insert(current >> 16, ip + 2);
-
-                // If we haven't found a match in a while, start skipping ahead by emitting multiple
-                // literals at once.
-                ip += 1 + ((ip - last_match) >> skip_ahead_shift);
-            }
-            if data.len() < ip + 8 {
-                symbols.push(Symbol::LiteralRun {
-                    start: last_match as u32,
-                    end: data.len() as u32,
-                });
-                ip = data.len();
-            }
-
-            Self::write_symbols(writer, data, &symbols, ip == data.len())?;
-        }
-
-        Ok(())
     }
 }
 
@@ -564,14 +407,10 @@ impl<W: Write> Compressor<W> {
     pub fn new(mut writer: W) -> io::Result<Self> {
         writer.write_all(&[0x78, 0x01])?; // zlib header
 
-        let inner = match 1 {
+        let inner = match 6u8 {
             0 => CompressorInner::Stored,
-            _ => CompressorInner::Fast {
-                min_match: 4,
-                skip_ahead_shift: 3,
-                search_depth: 80,
-                nice_length: 16,
-            },
+            1..=5 => CompressorInner::Fast(FastCompressor::new()),
+            6.. => CompressorInner::Slow(SlowCompressor::new()),
         };
 
         Ok(Self {
@@ -587,31 +426,9 @@ impl<W: Write> Compressor<W> {
     }
 
     /// Write data to the compressor.
-    pub fn write_data(&mut self, mut data: &[u8]) -> io::Result<()> {
+    pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
         self.checksum.write(data);
-
-        // Feed the data into the compressor in 1 MB chunks.
-        const CHUNK_SIZE: usize = 1 << 20;
-        while !data.is_empty() {
-            if self.pending.is_empty() && data.len() >= CHUNK_SIZE {
-                self.inner
-                    .compress_data(&mut self.bit_writer, &data[..CHUNK_SIZE], false)?;
-                data = &data[CHUNK_SIZE..];
-                continue;
-            }
-
-            if data.len() + self.pending.len() < CHUNK_SIZE {
-                self.pending.extend_from_slice(data);
-                break;
-            }
-
-            let remaining = CHUNK_SIZE - self.pending.len();
-            self.pending.extend_from_slice(&data[..remaining]);
-            self.inner
-                .compress_data(&mut self.bit_writer, &self.pending, false)?;
-            self.pending.clear();
-        }
-
+        self.pending.extend_from_slice(data);
         Ok(())
     }
 
