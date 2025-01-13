@@ -104,7 +104,7 @@ pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
         // 00000000_iiiiiiii_10000001_0000???? (? = will be filled by huffman::build_table)
         // aaaaaaaa_bbbbbbbb_100000yy_0000xxxx
         // x = input_advance_bits, y = output_advance_bytes (literal)
-        entries[i] = (i as u32) << 16 | LITERAL_ENTRY | (1 << 8);
+        entries[i] = ((i as u32) << 16) | LITERAL_ENTRY | (1 << 8);
         i += 1;
     }
 
@@ -114,8 +114,8 @@ pub(crate) const LITLEN_TABLE_ENTRIES: [u32; 288] = {
         // 0000000z_zzzzzzzz_00000yyy_0000???? (? = will be filled by huffman::build_table)
         // 0000000z_zzzzzzzz_00000yyy_0000xxxx
         // x = input_advance_bits, y = extra_bits, z = distance_base (length)
-        entries[i] = (LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16
-            | (LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8;
+        entries[i] = ((LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16)
+            | ((LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8);
         i += 1;
     }
     entries
@@ -131,8 +131,8 @@ pub(crate) const DISTANCE_TABLE_ENTRIES: [u32; 32] = {
     let mut entries = [0; 32];
     let mut i = 0;
     while i < 30 {
-        entries[i] = (DIST_SYM_TO_DIST_BASE[i] as u32) << 16
-            | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8
+        entries[i] = ((DIST_SYM_TO_DIST_BASE[i] as u32) << 16)
+            | ((DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8)
             | LITERAL_ENTRY;
         i += 1;
     }

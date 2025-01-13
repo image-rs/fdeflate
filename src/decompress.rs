@@ -228,11 +228,11 @@ impl Decompressor {
                     }
 
                     let input0 = self.bits.peek_bits(8);
-                    let input1 = self.bits.peek_bits(16) >> 8 & 0xff;
+                    let input1 = (self.bits.peek_bits(16) >> 8) & 0xff;
                     if input0 & 0x0f != 0x08
                         || (input0 & 0xf0) > 0x70
                         || input1 & 0x20 != 0
-                        || (input0 << 8 | input1) % 31 != 0
+                        || ((input0 << 8) | input1) % 31 != 0
                     {
                         return Err(DecompressionError::BadZlibHeader);
                     }
@@ -623,9 +623,9 @@ impl<const LITLEN_TABLE_SIZE: usize, const DIST_TABLE_SIZE: usize>
         assert!(LITLEN_TABLE_SIZE.count_ones() == 1);
         assert!(DIST_TABLE_SIZE.count_ones() == 1);
         let litlen_table_mask = (LITLEN_TABLE_SIZE as u64) - 1;
-        let litlen_table_bits = LITLEN_TABLE_SIZE.trailing_zeros() as u32;
+        let litlen_table_bits = LITLEN_TABLE_SIZE.trailing_zeros();
         let dist_table_mask = (DIST_TABLE_SIZE as u64) - 1;
-        let dist_table_bits = DIST_TABLE_SIZE.trailing_zeros() as u32;
+        let dist_table_bits = DIST_TABLE_SIZE.trailing_zeros();
         // Lower bound on table sizes, because 1a) RFC1951 uses at most 15 bits for codewords and
         // 1b) we can fit at most 8 bits of `overflow_bits_mask` in the last byte of a primary
         // table entry.
@@ -653,14 +653,15 @@ impl<const LITLEN_TABLE_SIZE: usize, const DIST_TABLE_SIZE: usize>
             let mut litlen_code_bits = litlen_entry as u8;
             if litlen_entry & LITERAL_ENTRY != 0 {
                 let litlen_entry2 = self.litlen_table
-                    [(bit_buffer.buffer >> litlen_code_bits & litlen_table_mask) as usize];
+                    [((bit_buffer.buffer >> litlen_code_bits) & litlen_table_mask) as usize];
                 let litlen_code_bits2 = litlen_entry2 as u8;
-                let litlen_entry3 =
-                    self.litlen_table[(bit_buffer.buffer >> (litlen_code_bits + litlen_code_bits2)
-                        & litlen_table_mask) as usize];
+                let litlen_entry3 = self.litlen_table[((bit_buffer.buffer
+                    >> (litlen_code_bits + litlen_code_bits2))
+                    & litlen_table_mask)
+                    as usize];
                 let litlen_code_bits3 = litlen_entry3 as u8;
-                let litlen_entry4 = self.litlen_table[(bit_buffer.buffer
-                    >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3)
+                let litlen_entry4 = self.litlen_table[((bit_buffer.buffer
+                    >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3))
                     & litlen_table_mask)
                     as usize];
 

@@ -118,8 +118,8 @@ pub fn build_table(
                             let codeword1 = codes[sym1];
                             let codeword2 = codes[sym2];
                             let codeword = codeword1 | (codeword2 << len1);
-                            let entry = (sym1 as u32) << 16
-                                | (sym2 as u32) << 24
+                            let entry = ((sym1 as u32) << 16)
+                                | ((sym2 as u32) << 24)
                                 | LITERAL_ENTRY
                                 | (2 << 8);
                             primary_table[codeword as usize] = entry | (length as u32);
