@@ -215,20 +215,21 @@ fn write_block<W: Write>(
     let mut dist_codes = [0u16; 30];
     build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
 
-    if eof {
-        writer.write_bits(101, 3)?; // final block
-    } else {
-        writer.write_bits(100, 3)?; // non-final block
-    }
-    writer.write_bits(29, 5)?; // hlit
-    writer.write_bits(29, 5)?; // hdist
-    writer.write_bits(15, 4)?; // hclen
+    let mut num_litlen_codes = 286;
+    // while num_litlen_codes > 257 && lengths[num_litlen_codes - 1] == 0 {
+    //     num_litlen_codes -= 1;
+    // }
+
+    let mut num_dist_codes = 30;
+    // while num_dist_codes > 1 && dist_lengths[num_dist_codes - 1] == 0 {
+    //     num_dist_codes -= 1;
+    // }
 
     let mut code_length_frequencies = [0u32; 19];
-    for &length in &lengths {
+    for &length in &lengths[..num_litlen_codes] {
         code_length_frequencies[length as usize] += 1;
     }
-    for &length in &dist_lengths {
+    for &length in &dist_lengths[..num_dist_codes] {
         code_length_frequencies[length as usize] += 1;
     }
     let mut code_length_lengths = [0u8; 19];
@@ -240,11 +241,24 @@ fn write_block<W: Write>(
         7,
     );
 
+    if eof {
+        writer.write_bits(101, 3)?; // final block
+    } else {
+        writer.write_bits(100, 3)?; // non-final block
+    }
+
+    writer.write_bits(num_litlen_codes as u64 - 257, 5)?; // hlit
+    writer.write_bits(num_dist_codes as u64 - 1, 5)?; // hdist
+    writer.write_bits(15, 4)?; // hclen
+
     for j in 0..19 {
         writer.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
     }
 
-    for &length in lengths.iter().chain(&dist_lengths) {
+    for &length in lengths[..num_litlen_codes]
+        .iter()
+        .chain(&dist_lengths[..num_dist_codes])
+    {
         writer.write_bits(
             code_length_codes[length as usize] as u64,
             code_length_lengths[length as usize],

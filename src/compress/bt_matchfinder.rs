@@ -1,7 +1,7 @@
 use super::{compute_hash, compute_hash3, WINDOW_SIZE};
 
 const CACHE3_SIZE: usize = 1 << 15;
-const CACHE_SIZE: usize = 1 << 18;
+const CACHE_SIZE: usize = 1 << 16;
 
 /// Find the length of the match between the current position and the previous position, searching
 /// both forwards and backwards from the starting position.
@@ -49,8 +49,8 @@ impl BTreeMatchFinder {
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
-            search_depth: 15000,
-            early_return_length: 64,
+            search_depth: 2000,
+            early_return_length: 256,
         }
     }
 
