@@ -1038,7 +1038,7 @@ impl BitBuffer {
         if input.len() >= 8 {
             let mut bits = self.nbits & 63; // limits `bits` to 63 or less, elides bounds checks
             self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << bits;
-            *input = &input[(63 - bits as usize) / 8..];
+            *input = &input[((63 - bits) / 8) as usize..];
             bits |= 56;
             self.nbits = bits;
         } else {
