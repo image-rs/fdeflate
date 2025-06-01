@@ -1036,9 +1036,11 @@ impl BitBuffer {
 
     fn fill_buffer(&mut self, input: &mut &[u8]) {
         if input.len() >= 8 {
-            self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << self.nbits;
-            *input = &input[(63 - self.nbits as usize) / 8..];
-            self.nbits |= 56;
+            let mut bits = self.nbits & 63; // limits `bits` to 63 or less, elides bounds checks
+            self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << bits;
+            *input = &input[(63 - bits as usize) / 8..];
+            bits |= 56;
+            self.nbits = bits;
         } else {
             let nbytes = input.len().min((63 - self.nbits as usize) / 8);
             let mut input_data = [0; 8];
