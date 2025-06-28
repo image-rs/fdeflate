@@ -11,7 +11,7 @@ impl FastCompressor {
     pub fn new() -> Self {
         Self {
             match_finder: HashTableMatchFinder::new(),
-            skip_ahead_shift: 6,
+            skip_ahead_shift: 4,
         }
     }
 
@@ -90,7 +90,19 @@ impl FastCompressor {
 
                 // If we haven't found a match in a while, start skipping ahead by emitting multiple
                 // literals at once.
-                ip += 1 + ((ip - last_match) >> self.skip_ahead_shift);
+                let advance = 1 + ((ip - last_match) >> self.skip_ahead_shift);
+                if advance >= 8 {
+                    let end_index = (ip + advance).min(data.len());
+                    if let Some(advance) = data[ip + 1..end_index]
+                        .chunks_exact(8)
+                        .position(|w| w == [0; 8])
+                    {
+                        ip += advance + 1;
+                        continue 'outer;
+                    }
+                }
+
+                ip += advance;
             }
             if data.len() < ip + 8 {
                 symbols.push(Symbol::LiteralRun {
