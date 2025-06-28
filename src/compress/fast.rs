@@ -5,21 +5,21 @@ use super::{BitWriter, HashChainMatchFinder, Symbol};
 pub(super) struct FastCompressor {
     match_finder: HashChainMatchFinder,
 
-    min_match: u8,
+    // min_match: u8,
     skip_ahead_shift: u8,
-    search_depth: u16,
-    nice_length: u16,
+    // search_depth: u16,
+    // nice_length: u16,
 }
 
 impl FastCompressor {
     pub fn new() -> Self {
         Self {
-            match_finder: HashChainMatchFinder::new(80, 16, 4),
+            match_finder: HashChainMatchFinder::new(1, 16, 8),
 
-            min_match: 4,
-            skip_ahead_shift: 9,
-            search_depth: 64,
-            nice_length: 258,
+            // min_match: 4,
+            skip_ahead_shift: 6,
+            // search_depth: 64,
+            // nice_length: 258,
         }
     }
 
@@ -108,7 +108,7 @@ impl FastCompressor {
 
                     let match_end = match_start + length as usize;
                     let insert_end = (match_end - 2).min(data.len() - 8);
-                    let insert_start = ip + 1;//.max(insert_end.saturating_sub(16));
+                    let insert_start = (ip + 1).max(insert_end.saturating_sub(8));
                     for j in (insert_start..insert_end).step_by(3) {
                         let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
                         self.match_finder.insert(v, j);
@@ -130,8 +130,8 @@ impl FastCompressor {
                     continue 'outer;
                 }
 
-                // matches.insert(current >> 8, ip + 1);
-                // matches.insert(current >> 16, ip + 2);
+                // self.match_finder.insert(current >> 8, ip + 1);
+                // self.match_finder.insert(current >> 16, ip + 2);
 
                 // If we haven't found a match in a while, start skipping ahead by emitting multiple
                 // literals at once.
