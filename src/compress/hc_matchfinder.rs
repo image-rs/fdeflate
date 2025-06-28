@@ -1,4 +1,3 @@
-
 use super::{compute_hash, compute_hash3, WINDOW_SIZE};
 
 const CACHE3_SIZE: usize = 1 << 15;
@@ -47,7 +46,7 @@ pub(crate) struct HashChainMatchFinder {
 }
 impl HashChainMatchFinder {
     pub(crate) fn new(search_depth: u16, nice_length: u16, min_match: u8) -> Self {
-        assert!((3..=6).contains(&min_match));
+        assert!((3..=8).contains(&min_match));
 
         Self {
             hash3_table: (min_match == 3)
@@ -57,7 +56,11 @@ impl HashChainMatchFinder {
             search_depth,
             good_length: 32,
             nice_length,
-            hash_mask: (1 << (min_match.max(4) * 8)) - 1,
+            hash_mask: if min_match == 8 {
+                u64::MAX
+            } else {
+                (1 << (min_match.max(4) * 8)) - 1
+            },
         }
     }
 
@@ -99,8 +102,8 @@ impl HashChainMatchFinder {
                 best_length = length;
                 best_offset = offset as u32;
                 best_ip = start;
-            // } else if best_length > min_match {
-            //     break;
+                // } else if best_length > min_match {
+                //     break;
             }
             if length >= self.nice_length || ip + length as usize == data.len() {
                 break;
