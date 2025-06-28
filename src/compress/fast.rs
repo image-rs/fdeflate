@@ -10,7 +10,7 @@ pub(super) struct FastCompressor {
 impl FastCompressor {
     pub fn new() -> Self {
         Self {
-            match_finder: HashTableMatchFinder::new(8),
+            match_finder: HashTableMatchFinder::new(),
             skip_ahead_shift: 6,
         }
     }
@@ -76,12 +76,10 @@ impl FastCompressor {
 
                     let match_end = match_start + length as usize;
                     let insert_end = (match_end - 2).min(data.len() - 8);
-                    let insert_start = (ip + 1).max(insert_end.saturating_sub(8));
+                    let insert_start = (ip + 1).max(insert_end.saturating_sub(16));
                     for j in (insert_start..insert_end).step_by(3) {
                         let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
                         self.match_finder.insert(v, j);
-                        self.match_finder.insert(v >> 8, j + 1);
-                        self.match_finder.insert(v >> 16, j + 2);
                     }
 
                     ip = match_end;
@@ -90,12 +88,9 @@ impl FastCompressor {
                     continue 'outer;
                 }
 
-                // self.match_finder.insert(current >> 8, ip + 1);
-                // self.match_finder.insert(current >> 16, ip + 2);
-
                 // If we haven't found a match in a while, start skipping ahead by emitting multiple
                 // literals at once.
-                ip += 2 + ((ip - last_match) >> self.skip_ahead_shift);
+                ip += 1 + ((ip - last_match) >> self.skip_ahead_shift);
             }
             if data.len() < ip + 8 {
                 symbols.push(Symbol::LiteralRun {
