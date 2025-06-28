@@ -1,5 +1,6 @@
 use fast::FastCompressor;
 use hc_matchfinder::HashChainMatchFinder;
+use ht_matchfinder::HashTableMatchFinder;
 use simd_adler32::Adler32;
 use slow::SlowCompressor;
 use std::{
@@ -14,8 +15,10 @@ use crate::tables::{
 
 mod bt_matchfinder;
 mod hc_matchfinder;
+mod ht_matchfinder;
 
 mod fast;
+mod medium;
 mod slow;
 
 fn build_huffman_tree(
@@ -206,14 +209,24 @@ fn write_block<W: Write>(
             }
         }
     }
+    write_block_inner(writer, data, symbols, eof, &frequencies, &dist_frequencies)
+}
 
+fn write_block_inner<W: Write>(
+    writer: &mut BitWriter<W>,
+    data: &[u8],
+    symbols: &[Symbol],
+    eof: bool,
+    frequencies: &[u32; 286],
+    dist_frequencies: &[u32; 30],
+) -> io::Result<()> {
     let mut lengths = [0u8; 286];
     let mut codes = [0u16; 286];
-    build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
+    build_huffman_tree(frequencies, &mut lengths, &mut codes, 15);
 
     let mut dist_lengths = [0u8; 30];
     let mut dist_codes = [0u16; 30];
-    build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
+    build_huffman_tree(dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
 
     let mut num_litlen_codes = 286;
     // while num_litlen_codes > 257 && lengths[num_litlen_codes - 1] == 0 {
@@ -421,7 +434,7 @@ impl<W: Write> Compressor<W> {
     pub fn new(mut writer: W) -> io::Result<Self> {
         writer.write_all(&[0x78, 0x01])?; // zlib header
 
-        let inner = match 6u8 {
+        let inner = match 1u8 {
             0 => CompressorInner::Stored,
             1..=5 => CompressorInner::Fast(FastCompressor::new()),
             6.. => CompressorInner::Slow(SlowCompressor::new()),
