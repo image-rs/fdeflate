@@ -167,9 +167,11 @@ fn compute_hash3(v: u32) -> u32 {
     (0x330698ecu64.wrapping_mul(((v & 0xff_ffff) ^ 0x2722_0a95) as u64) >> 16) as u32
 }
 fn compute_hash(v: u64) -> u32 {
-    let mut hasher = fnv::FnvHasher::default();
-    std::hash::Hasher::write_u64(&mut hasher, v);
-    std::hash::Hasher::finish(&hasher) as u32
+    // let mut hasher = fnv::FnvHasher::default();
+    // std::hash::Hasher::write_u64(&mut hasher, v);
+    // std::hash::Hasher::finish(&hasher) as u32
+
+    (11400714785074694791u64.wrapping_mul(v) >> 40) as u32
 }
 
 enum Symbol {
