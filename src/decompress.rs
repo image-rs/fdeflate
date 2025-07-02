@@ -1,12 +1,16 @@
 use simd_adler32::Adler32;
+use std::num::NonZeroUsize;
 
-use crate::tables::{
-    self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FDEFLATE_DIST_DECODE_TABLE,
-    FDEFLATE_LITLEN_DECODE_TABLE, FIXED_CODE_LENGTHS, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA,
+use crate::{
+    huffman::{self, build_table},
+    tables::{
+        self, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_DIST_TABLE,
+        FIXED_LITLEN_TABLE, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA, LITLEN_TABLE_ENTRIES,
+    },
 };
 
 /// An error encountered while decompressing a deflate stream.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum DecompressionError {
     /// The zlib header is corrupt.
     BadZlibHeader,
@@ -50,64 +54,31 @@ struct BlockHeader {
     num_lengths_read: usize,
 
     /// Low 3-bits are code length code length, high 5-bits are code length code.
-    table: [u8; 128],
+    table: [u32; 128],
     code_lengths: [u8; 320],
 }
 
-const LITERAL_ENTRY: u32 = 0x8000;
-const EXCEPTIONAL_ENTRY: u32 = 0x4000;
-const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
+pub const LITERAL_ENTRY: u32 = 0x8000;
+pub const EXCEPTIONAL_ENTRY: u32 = 0x4000;
+pub const SECONDARY_TABLE_ENTRY: u32 = 0x2000;
+
+// See https://github.com/image-rs/fdeflate/issues/45 for discussion of the table sizes.
+const DEFAULT_LITLEN_TABLE_SIZE: usize = 4096;
+const DEFAULT_DIST_TABLE_SIZE: usize = 512;
 
 /// The Decompressor state for a compressed block.
-///
-/// The main litlen_table uses a 12-bit input to lookup the meaning of the symbol. The table is
-/// split into 4 sections:
-///
-///   aaaaaaaa_bbbbbbbb_1000yyyy_0000xxxx  x = input_advance_bits, y = output_advance_bytes (literal)
-///   0000000z_zzzzzzzz_00000yyy_0000xxxx  x = input_advance_bits, y = extra_bits, z = distance_base (length)
-///   00000000_00000000_01000000_0000xxxx  x = input_advance_bits (EOF)
-///   0000xxxx_xxxxxxxx_01100000_00000000  x = secondary_table_index
-///   00000000_00000000_01000000_00000000  invalid code
-///
-/// The distance table is a 512-entry table that maps 9 bits of distance symbols to their meaning.
-///
-///   00000000_00000000_00000000_00000000     symbol is more than 9 bits
-///   zzzzzzzz_zzzzzzzz_0000yyyy_0000xxxx     x = input_advance_bits, y = extra_bits, z = distance_base
-#[repr(align(64))]
 #[derive(Eq, PartialEq, Debug)]
-struct CompressedBlock {
-    litlen_table: [u32; 4096],
-    dist_table: [u32; 512],
-
-    dist_symbol_lengths: [u8; 30],
-    dist_symbol_masks: [u16; 30],
-    dist_symbol_codes: [u16; 30],
-
+struct CompressedBlock<const LITLEN_TABLE_SIZE: usize, const DIST_TABLE_SIZE: usize> {
+    litlen_table: Box<[u32; LITLEN_TABLE_SIZE]>,
     secondary_table: Vec<u16>,
+
+    dist_table: Box<[u32; DIST_TABLE_SIZE]>,
+    dist_secondary_table: Vec<u16>,
+
     eof_code: u16,
     eof_mask: u16,
     eof_bits: u8,
 }
-
-const FDEFLATE_COMPRESSED_BLOCK: CompressedBlock = CompressedBlock {
-    litlen_table: FDEFLATE_LITLEN_DECODE_TABLE,
-    dist_table: FDEFLATE_DIST_DECODE_TABLE,
-    dist_symbol_lengths: [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ],
-    dist_symbol_masks: [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ],
-    dist_symbol_codes: [
-        0, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
-        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
-        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
-    ],
-    secondary_table: Vec::new(),
-    eof_code: 0x8ff,
-    eof_mask: 0xfff,
-    eof_bits: 0xc,
-};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum State {
@@ -124,18 +95,17 @@ enum State {
 /// Decompressor for arbitrary zlib streams.
 pub struct Decompressor {
     /// State for decoding a compressed block.
-    compression: CompressedBlock,
+    compression: CompressedBlock<DEFAULT_LITLEN_TABLE_SIZE, DEFAULT_DIST_TABLE_SIZE>,
     // State for decoding a block header.
     header: BlockHeader,
     // Number of bytes left for uncompressed block.
     uncompressed_bytes_left: u16,
 
-    buffer: u64,
-    nbits: u8,
+    bits: BitBuffer,
 
-    queued_rle: Option<(u8, usize)>,
-    queued_backref: Option<(usize, usize)>,
+    queued_output: Option<QueuedOutput>,
     last_block: bool,
+    fixed_table: bool,
 
     state: State,
     checksum: Adler32,
@@ -152,15 +122,12 @@ impl Decompressor {
     /// Create a new decompressor.
     pub fn new() -> Self {
         Self {
-            buffer: 0,
-            nbits: 0,
+            bits: BitBuffer::new(),
             compression: CompressedBlock {
-                litlen_table: [0; 4096],
-                dist_table: [0; 512],
+                litlen_table: Box::new([0; DEFAULT_LITLEN_TABLE_SIZE]),
+                dist_table: Box::new([0; DEFAULT_DIST_TABLE_SIZE]),
                 secondary_table: Vec::new(),
-                dist_symbol_lengths: [0; 30],
-                dist_symbol_masks: [0; 30],
-                dist_symbol_codes: [0xffff; 30],
+                dist_secondary_table: Vec::new(),
                 eof_code: 0,
                 eof_mask: 0,
                 eof_bits: 0,
@@ -174,672 +141,18 @@ impl Decompressor {
                 code_lengths: [0; 320],
             },
             uncompressed_bytes_left: 0,
-            queued_rle: None,
-            queued_backref: None,
+            queued_output: None,
             checksum: Adler32::new(),
             state: State::ZlibHeader,
             last_block: false,
             ignore_adler32: false,
+            fixed_table: false,
         }
     }
 
     /// Ignore the checksum at the end of the stream.
     pub fn ignore_adler32(&mut self) {
         self.ignore_adler32 = true;
-    }
-
-    fn fill_buffer(&mut self, input: &mut &[u8]) {
-        if input.len() >= 8 {
-            self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << self.nbits;
-            *input = &input[(63 - self.nbits as usize) / 8..];
-            self.nbits |= 56;
-        } else {
-            let nbytes = input.len().min((63 - self.nbits as usize) / 8);
-            let mut input_data = [0; 8];
-            input_data[..nbytes].copy_from_slice(&input[..nbytes]);
-            self.buffer |= u64::from_le_bytes(input_data)
-                .checked_shl(self.nbits as u32)
-                .unwrap_or(0);
-            self.nbits += nbytes as u8 * 8;
-            *input = &input[nbytes..];
-        }
-    }
-
-    fn peak_bits(&mut self, nbits: u8) -> u64 {
-        debug_assert!(nbits <= 56 && nbits <= self.nbits);
-        self.buffer & ((1u64 << nbits) - 1)
-    }
-    fn consume_bits(&mut self, nbits: u8) {
-        debug_assert!(self.nbits >= nbits);
-        self.buffer >>= nbits;
-        self.nbits -= nbits;
-    }
-
-    fn read_block_header(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
-        self.fill_buffer(remaining_input);
-        if self.nbits < 3 {
-            return Ok(());
-        }
-
-        let start = self.peak_bits(3);
-        self.last_block = start & 1 != 0;
-        match start >> 1 {
-            0b00 => {
-                let align_bits = (self.nbits - 3) % 8;
-                let header_bits = 3 + 32 + align_bits;
-                if self.nbits < header_bits {
-                    return Ok(());
-                }
-
-                let len = (self.peak_bits(align_bits + 19) >> (align_bits + 3)) as u16;
-                let nlen = (self.peak_bits(header_bits) >> (align_bits + 19)) as u16;
-                if nlen != !len {
-                    return Err(DecompressionError::InvalidUncompressedBlockLength);
-                }
-
-                self.state = State::UncompressedData;
-                self.uncompressed_bytes_left = len;
-                self.consume_bits(header_bits);
-                Ok(())
-            }
-            0b01 => {
-                self.consume_bits(3);
-                // TODO: Do this statically rather than every time.
-                Self::build_tables(288, &FIXED_CODE_LENGTHS, &mut self.compression, 6)?;
-                self.state = State::CompressedData;
-                Ok(())
-            }
-            0b10 => {
-                if self.nbits < 17 {
-                    return Ok(());
-                }
-
-                self.header.hlit = (self.peak_bits(8) >> 3) as usize + 257;
-                self.header.hdist = (self.peak_bits(13) >> 8) as usize + 1;
-                self.header.hclen = (self.peak_bits(17) >> 13) as usize + 4;
-                if self.header.hlit > 286 {
-                    return Err(DecompressionError::InvalidHlit);
-                }
-                if self.header.hdist > 30 {
-                    return Err(DecompressionError::InvalidHdist);
-                }
-
-                self.consume_bits(17);
-                self.state = State::CodeLengthCodes;
-                Ok(())
-            }
-            0b11 => Err(DecompressionError::InvalidBlockType),
-            _ => unreachable!(),
-        }
-    }
-
-    fn read_code_length_codes(
-        &mut self,
-        remaining_input: &mut &[u8],
-    ) -> Result<(), DecompressionError> {
-        self.fill_buffer(remaining_input);
-        if self.nbits as usize + remaining_input.len() * 8 < 3 * self.header.hclen {
-            return Ok(());
-        }
-
-        let mut code_length_lengths = [0; 19];
-        for i in 0..self.header.hclen {
-            code_length_lengths[CLCL_ORDER[i]] = self.peak_bits(3) as u8;
-            self.consume_bits(3);
-
-            // We need to refill the buffer after reading 3 * 18 = 54 bits since the buffer holds
-            // between 56 and 63 bits total.
-            if i == 17 {
-                self.fill_buffer(remaining_input);
-            }
-        }
-
-        let code_length_codes: [u16; 19] = crate::compute_codes(&code_length_lengths)
-            .ok_or(DecompressionError::BadCodeLengthHuffmanTree)?;
-
-        self.header.table = [255; 128];
-        for i in 0..19 {
-            let length = code_length_lengths[i];
-            if length > 0 {
-                let mut j = code_length_codes[i];
-                while j < 128 {
-                    self.header.table[j as usize] = ((i as u8) << 3) | length;
-                    j += 1 << length;
-                }
-            }
-        }
-
-        self.state = State::CodeLengths;
-        self.header.num_lengths_read = 0;
-        Ok(())
-    }
-
-    fn read_code_lengths(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
-        let total_lengths = self.header.hlit + self.header.hdist;
-        while self.header.num_lengths_read < total_lengths {
-            self.fill_buffer(remaining_input);
-            if self.nbits < 7 {
-                return Ok(());
-            }
-
-            let code = self.peak_bits(7);
-            let entry = self.header.table[code as usize];
-            let length = entry & 0x7;
-            let symbol = entry >> 3;
-
-            debug_assert!(length != 0);
-            match symbol {
-                0..=15 => {
-                    self.header.code_lengths[self.header.num_lengths_read] = symbol;
-                    self.header.num_lengths_read += 1;
-                    self.consume_bits(length);
-                }
-                16..=18 => {
-                    let (base_repeat, extra_bits) = match symbol {
-                        16 => (3, 2),
-                        17 => (3, 3),
-                        18 => (11, 7),
-                        _ => unreachable!(),
-                    };
-
-                    if self.nbits < length + extra_bits {
-                        return Ok(());
-                    }
-
-                    let value = match symbol {
-                        16 => {
-                            self.header.code_lengths[self
-                                .header
-                                .num_lengths_read
-                                .checked_sub(1)
-                                .ok_or(DecompressionError::InvalidCodeLengthRepeat)?]
-                            // TODO: is this right?
-                        }
-                        17 => 0,
-                        18 => 0,
-                        _ => unreachable!(),
-                    };
-
-                    let repeat =
-                        (self.peak_bits(length + extra_bits) >> length) as usize + base_repeat;
-                    if self.header.num_lengths_read + repeat > total_lengths {
-                        return Err(DecompressionError::InvalidCodeLengthRepeat);
-                    }
-
-                    for i in 0..repeat {
-                        self.header.code_lengths[self.header.num_lengths_read + i] = value;
-                    }
-                    self.header.num_lengths_read += repeat;
-                    self.consume_bits(length + extra_bits);
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        self.header
-            .code_lengths
-            .copy_within(self.header.hlit..total_lengths, 288);
-        for i in self.header.hlit..288 {
-            self.header.code_lengths[i] = 0;
-        }
-        for i in 288 + self.header.hdist..320 {
-            self.header.code_lengths[i] = 0;
-        }
-
-        if self.header.hdist == 1
-            && self.header.code_lengths[..286] == tables::HUFFMAN_LENGTHS
-            && self.header.code_lengths[288] == 1
-        {
-            self.compression = FDEFLATE_COMPRESSED_BLOCK;
-        } else {
-            Self::build_tables(
-                self.header.hlit,
-                &self.header.code_lengths,
-                &mut self.compression,
-                6,
-            )?;
-        }
-        self.state = State::CompressedData;
-        Ok(())
-    }
-
-    fn build_tables(
-        hlit: usize,
-        code_lengths: &[u8],
-        compression: &mut CompressedBlock,
-        max_search_bits: u8,
-    ) -> Result<(), DecompressionError> {
-        // If there is no code assigned for the EOF symbol then the bitstream is invalid.
-        if code_lengths[256] == 0 {
-            // TODO: Return a dedicated error in this case.
-            return Err(DecompressionError::BadLiteralLengthHuffmanTree);
-        }
-
-        // Build the literal/length code table.
-        let lengths = &code_lengths[..288];
-        let codes: [u16; 288] = crate::compute_codes(&lengths.try_into().unwrap())
-            .ok_or(DecompressionError::BadLiteralLengthHuffmanTree)?;
-
-        let table_bits = lengths.iter().cloned().max().unwrap().min(12).max(6);
-        let table_size = 1 << table_bits;
-
-        for i in 0..256 {
-            let code = codes[i];
-            let length = lengths[i];
-            let mut j = code;
-
-            while j < table_size && length != 0 && length <= 12 {
-                compression.litlen_table[j as usize] =
-                    ((i as u32) << 16) | LITERAL_ENTRY | (1 << 8) | length as u32;
-                j += 1 << length;
-            }
-
-            if length > 0 && length <= max_search_bits {
-                for ii in 0..256 {
-                    let code2 = codes[ii];
-                    let length2 = lengths[ii];
-                    if length2 != 0 && length + length2 <= table_bits {
-                        let mut j = code | (code2 << length);
-
-                        while j < table_size {
-                            compression.litlen_table[j as usize] = (ii as u32) << 24
-                                | (i as u32) << 16
-                                | LITERAL_ENTRY
-                                | (2 << 8)
-                                | ((length + length2) as u32);
-                            j += 1 << (length + length2);
-                        }
-                    }
-                }
-            }
-        }
-
-        if lengths[256] != 0 && lengths[256] <= 12 {
-            let mut j = codes[256];
-            while j < table_size {
-                compression.litlen_table[j as usize] = EXCEPTIONAL_ENTRY | lengths[256] as u32;
-                j += 1 << lengths[256];
-            }
-        }
-
-        let table_size = table_size as usize;
-        for i in (table_size..4096).step_by(table_size) {
-            compression.litlen_table.copy_within(0..table_size, i);
-        }
-
-        compression.eof_code = codes[256];
-        compression.eof_mask = (1 << lengths[256]) - 1;
-        compression.eof_bits = lengths[256];
-
-        for i in 257..hlit {
-            let code = codes[i];
-            let length = lengths[i];
-            if length != 0 && length <= 12 {
-                let mut j = code;
-                while j < 4096 {
-                    compression.litlen_table[j as usize] = if i < 286 {
-                        (LEN_SYM_TO_LEN_BASE[i - 257] as u32) << 16
-                            | (LEN_SYM_TO_LEN_EXTRA[i - 257] as u32) << 8
-                            | length as u32
-                    } else {
-                        EXCEPTIONAL_ENTRY
-                    };
-                    j += 1 << length;
-                }
-            }
-        }
-
-        for i in 0..hlit {
-            if lengths[i] > 12 {
-                compression.litlen_table[(codes[i] & 0xfff) as usize] = u32::MAX;
-            }
-        }
-
-        let mut secondary_table_len = 0;
-        for i in 0..hlit {
-            if lengths[i] > 12 {
-                let j = (codes[i] & 0xfff) as usize;
-                if compression.litlen_table[j] == u32::MAX {
-                    compression.litlen_table[j] =
-                        (secondary_table_len << 16) | EXCEPTIONAL_ENTRY | SECONDARY_TABLE_ENTRY;
-                    secondary_table_len += 8;
-                }
-            }
-        }
-        assert!(secondary_table_len <= 0x7ff);
-        compression.secondary_table = vec![0; secondary_table_len as usize];
-        for i in 0..hlit {
-            let code = codes[i];
-            let length = lengths[i];
-            if length > 12 {
-                let j = (codes[i] & 0xfff) as usize;
-                let k = (compression.litlen_table[j] >> 16) as usize;
-
-                let mut s = code >> 12;
-                while s < 8 {
-                    debug_assert_eq!(compression.secondary_table[k + s as usize], 0);
-                    compression.secondary_table[k + s as usize] =
-                        ((i as u16) << 4) | (length as u16);
-                    s += 1 << (length - 12);
-                }
-            }
-        }
-        debug_assert!(compression
-            .secondary_table
-            .iter()
-            .all(|&x| x != 0 && (x & 0xf) > 12));
-
-        // Build the distance code table.
-        let lengths = &code_lengths[288..320];
-        if lengths == [0; 32] {
-            compression.dist_symbol_masks = [0; 30];
-            compression.dist_symbol_codes = [0xffff; 30];
-            compression.dist_table.fill(0);
-        } else {
-            let codes: [u16; 32] = match crate::compute_codes(&lengths.try_into().unwrap()) {
-                Some(codes) => codes,
-                None => {
-                    if lengths.iter().filter(|&&l| l != 0).count() != 1 {
-                        return Err(DecompressionError::BadDistanceHuffmanTree);
-                    }
-                    [0; 32]
-                }
-            };
-
-            compression.dist_symbol_codes.copy_from_slice(&codes[..30]);
-            compression
-                .dist_symbol_lengths
-                .copy_from_slice(&lengths[..30]);
-            compression.dist_table.fill(0);
-            for i in 0..30 {
-                let length = lengths[i];
-                let code = codes[i];
-                if length == 0 {
-                    compression.dist_symbol_masks[i] = 0;
-                    compression.dist_symbol_codes[i] = 0xffff;
-                } else {
-                    compression.dist_symbol_masks[i] = (1 << lengths[i]) - 1;
-                    if lengths[i] <= 9 {
-                        let mut j = code;
-                        while j < 512 {
-                            compression.dist_table[j as usize] = (DIST_SYM_TO_DIST_BASE[i] as u32)
-                                << 16
-                                | (DIST_SYM_TO_DIST_EXTRA[i] as u32) << 8
-                                | length as u32;
-                            j += 1 << lengths[i];
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn read_compressed(
-        &mut self,
-        remaining_input: &mut &[u8],
-        output: &mut [u8],
-        mut output_index: usize,
-    ) -> Result<usize, DecompressionError> {
-        while let State::CompressedData = self.state {
-            self.fill_buffer(remaining_input);
-            if output_index == output.len() {
-                break;
-            }
-
-            let mut bits = self.buffer;
-            let litlen_entry = self.compression.litlen_table[(bits & 0xfff) as usize];
-            let litlen_code_bits = litlen_entry as u8;
-
-            if litlen_entry & LITERAL_ENTRY != 0 {
-                // Ultra-fast path: do 3 more consecutive table lookups and bail if any of them need the slow path.
-                if self.nbits >= 48 {
-                    let litlen_entry2 =
-                        self.compression.litlen_table[(bits >> litlen_code_bits & 0xfff) as usize];
-                    let litlen_code_bits2 = litlen_entry2 as u8;
-                    let litlen_entry3 = self.compression.litlen_table
-                        [(bits >> (litlen_code_bits + litlen_code_bits2) & 0xfff) as usize];
-                    let litlen_code_bits3 = litlen_entry3 as u8;
-                    let litlen_entry4 = self.compression.litlen_table[(bits
-                        >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3)
-                        & 0xfff)
-                        as usize];
-                    let litlen_code_bits4 = litlen_entry4 as u8;
-                    if litlen_entry2 & litlen_entry3 & litlen_entry4 & LITERAL_ENTRY != 0 {
-                        let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
-                        let advance_output_bytes2 = ((litlen_entry2 & 0xf00) >> 8) as usize;
-                        let advance_output_bytes3 = ((litlen_entry3 & 0xf00) >> 8) as usize;
-                        let advance_output_bytes4 = ((litlen_entry4 & 0xf00) >> 8) as usize;
-                        if output_index
-                            + advance_output_bytes
-                            + advance_output_bytes2
-                            + advance_output_bytes3
-                            + advance_output_bytes4
-                            < output.len()
-                        {
-                            self.consume_bits(
-                                litlen_code_bits
-                                    + litlen_code_bits2
-                                    + litlen_code_bits3
-                                    + litlen_code_bits4,
-                            );
-
-                            output[output_index] = (litlen_entry >> 16) as u8;
-                            output[output_index + 1] = (litlen_entry >> 24) as u8;
-                            output_index += advance_output_bytes;
-                            output[output_index] = (litlen_entry2 >> 16) as u8;
-                            output[output_index + 1] = (litlen_entry2 >> 24) as u8;
-                            output_index += advance_output_bytes2;
-                            output[output_index] = (litlen_entry3 >> 16) as u8;
-                            output[output_index + 1] = (litlen_entry3 >> 24) as u8;
-                            output_index += advance_output_bytes3;
-                            output[output_index] = (litlen_entry4 >> 16) as u8;
-                            output[output_index + 1] = (litlen_entry4 >> 24) as u8;
-                            output_index += advance_output_bytes4;
-                            continue;
-                        }
-                    }
-                }
-
-                // Fast path: the next symbol is <= 12 bits and a literal, the table specifies the
-                // output bytes and we can directly write them to the output buffer.
-                let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
-
-                // match advance_output_bytes {
-                //     1 => println!("[{output_index}] LIT1 {}", litlen_entry >> 16),
-                //     2 => println!(
-                //         "[{output_index}] LIT2 {} {} {}",
-                //         (litlen_entry >> 16) as u8,
-                //         litlen_entry >> 24,
-                //         bits & 0xfff
-                //     ),
-                //     n => println!(
-                //         "[{output_index}] LIT{n} {} {}",
-                //         (litlen_entry >> 16) as u8,
-                //         litlen_entry >> 24,
-                //     ),
-                // }
-
-                if self.nbits < litlen_code_bits {
-                    break;
-                } else if output_index + 1 < output.len() {
-                    output[output_index] = (litlen_entry >> 16) as u8;
-                    output[output_index + 1] = (litlen_entry >> 24) as u8;
-                    output_index += advance_output_bytes;
-                    self.consume_bits(litlen_code_bits);
-                    continue;
-                } else if output_index + advance_output_bytes == output.len() {
-                    debug_assert_eq!(advance_output_bytes, 1);
-                    output[output_index] = (litlen_entry >> 16) as u8;
-                    output_index += 1;
-                    self.consume_bits(litlen_code_bits);
-                    break;
-                } else {
-                    debug_assert_eq!(advance_output_bytes, 2);
-                    output[output_index] = (litlen_entry >> 16) as u8;
-                    self.queued_rle = Some(((litlen_entry >> 24) as u8, 1));
-                    output_index += 1;
-                    self.consume_bits(litlen_code_bits);
-                    break;
-                }
-            }
-
-            let (length_base, length_extra_bits, litlen_code_bits) =
-                if litlen_entry & EXCEPTIONAL_ENTRY == 0 {
-                    (
-                        litlen_entry >> 16,
-                        (litlen_entry >> 8) as u8,
-                        litlen_code_bits,
-                    )
-                } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
-                    let secondary_index = litlen_entry >> 16;
-                    let secondary_entry = self.compression.secondary_table
-                        [secondary_index as usize + ((bits >> 12) & 0x7) as usize];
-                    let litlen_symbol = secondary_entry >> 4;
-                    let litlen_code_bits = (secondary_entry & 0xf) as u8;
-
-                    if self.nbits < litlen_code_bits {
-                        break;
-                    } else if litlen_symbol < 256 {
-                        // println!("[{output_index}] LIT1b {} (val={:04x})", litlen_symbol, self.peak_bits(15));
-
-                        self.consume_bits(litlen_code_bits);
-                        output[output_index] = litlen_symbol as u8;
-                        output_index += 1;
-                        continue;
-                    } else if litlen_symbol == 256 {
-                        // println!("[{output_index}] EOF");
-                        self.consume_bits(litlen_code_bits);
-                        self.state = match self.last_block {
-                            true => State::Checksum,
-                            false => State::BlockHeader,
-                        };
-                        break;
-                    }
-
-                    (
-                        LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
-                        LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257],
-                        litlen_code_bits,
-                    )
-                } else if litlen_code_bits == 0 {
-                    return Err(DecompressionError::InvalidLiteralLengthCode);
-                } else {
-                    if self.nbits < litlen_code_bits {
-                        break;
-                    }
-                    // println!("[{output_index}] EOF");
-                    self.consume_bits(litlen_code_bits);
-                    self.state = match self.last_block {
-                        true => State::Checksum,
-                        false => State::BlockHeader,
-                    };
-                    break;
-                };
-            bits >>= litlen_code_bits;
-
-            let length_extra_mask = (1 << length_extra_bits) - 1;
-            let length = length_base as usize + (bits & length_extra_mask) as usize;
-            bits >>= length_extra_bits;
-
-            let dist_entry = self.compression.dist_table[(bits & 0x1ff) as usize];
-            let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry != 0 {
-                (
-                    (dist_entry >> 16) as u16,
-                    (dist_entry >> 8) as u8,
-                    dist_entry as u8,
-                )
-            } else if self.nbits > litlen_code_bits + length_extra_bits + 9 {
-                let mut dist_extra_bits = 0;
-                let mut dist_base = 0;
-                let mut dist_advance_bits = 0;
-                for i in 0..self.compression.dist_symbol_lengths.len() {
-                    if bits as u16 & self.compression.dist_symbol_masks[i]
-                        == self.compression.dist_symbol_codes[i]
-                    {
-                        dist_extra_bits = DIST_SYM_TO_DIST_EXTRA[i];
-                        dist_base = DIST_SYM_TO_DIST_BASE[i];
-                        dist_advance_bits = self.compression.dist_symbol_lengths[i];
-                        break;
-                    }
-                }
-                if dist_advance_bits == 0 {
-                    return Err(DecompressionError::InvalidDistanceCode);
-                }
-                (dist_base, dist_extra_bits, dist_advance_bits)
-            } else {
-                break;
-            };
-            bits >>= dist_code_bits;
-
-            let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1)) as usize;
-            let total_bits =
-                litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits;
-
-            if self.nbits < total_bits {
-                break;
-            } else if dist > output_index {
-                return Err(DecompressionError::DistanceTooFarBack);
-            }
-
-            // println!("[{output_index}] BACKREF len={} dist={} {:x}", length, dist, dist_entry);
-            self.consume_bits(total_bits);
-
-            let copy_length = length.min(output.len() - output_index);
-            if dist == 1 {
-                let last = output[output_index - 1];
-                output[output_index..][..copy_length].fill(last);
-
-                if copy_length < length {
-                    self.queued_rle = Some((last, length - copy_length));
-                    output_index = output.len();
-                    break;
-                }
-            } else if output_index + length + 15 <= output.len() {
-                let start = output_index - dist;
-                output.copy_within(start..start + 16, output_index);
-
-                if length > 16 || dist < 16 {
-                    for i in (0..length).step_by(dist.min(16)).skip(1) {
-                        output.copy_within(start + i..start + i + 16, output_index + i);
-                    }
-                }
-            } else {
-                if dist < copy_length {
-                    for i in 0..copy_length {
-                        output[output_index + i] = output[output_index + i - dist];
-                    }
-                } else {
-                    output.copy_within(
-                        output_index - dist..output_index + copy_length - dist,
-                        output_index,
-                    )
-                }
-
-                if copy_length < length {
-                    self.queued_backref = Some((dist, length - copy_length));
-                    output_index = output.len();
-                    break;
-                }
-            }
-            output_index += copy_length;
-        }
-
-        if self.state == State::CompressedData
-            && self.queued_backref.is_none()
-            && self.queued_rle.is_none()
-            && self.nbits >= 15
-            && self.peak_bits(15) as u16 & self.compression.eof_mask == self.compression.eof_code
-        {
-            self.consume_bits(self.compression.eof_bits);
-            self.state = match self.last_block {
-                true => State::Checksum,
-                false => State::BlockHeader,
-            };
-        }
-
-        Ok(output_index)
     }
 
     /// Decompresses a chunk of data.
@@ -876,24 +189,30 @@ impl Decompressor {
         let mut remaining_input = input;
         let mut output_index = output_position;
 
-        if let Some((data, len)) = self.queued_rle.take() {
-            let n = len.min(output.len() - output_index);
-            output[output_index..][..n].fill(data);
-            output_index += n;
-            if n < len {
-                self.queued_rle = Some((data, len - n));
-                return Ok((0, n));
-            }
-        }
-        if let Some((dist, len)) = self.queued_backref.take() {
-            let n = len.min(output.len() - output_index);
-            for i in 0..n {
-                output[output_index + i] = output[output_index + i - dist];
-            }
-            output_index += n;
-            if n < len {
-                self.queued_backref = Some((dist, len - n));
-                return Ok((0, n));
+        if let Some(queued_output) = self.queued_output.take() {
+            match queued_output {
+                QueuedOutput::Rle { data, length } => {
+                    let length: usize = length.into();
+                    let n = length.min(output.len() - output_index);
+                    output[output_index..][..n].fill(data);
+                    output_index += n;
+                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
+                        self.queued_output = Some(QueuedOutput::Rle { data, length });
+                        return Ok((0, n));
+                    }
+                }
+                QueuedOutput::Backref { dist, length } => {
+                    let length: usize = length.into();
+                    let n = length.min(output.len() - output_index);
+                    for i in 0..n {
+                        output[output_index + i] = output[output_index + i - dist];
+                    }
+                    output_index += n;
+                    if let Ok(length) = NonZeroUsize::try_from(length - n) {
+                        self.queued_output = Some(QueuedOutput::Backref { dist, length });
+                        return Ok((0, n));
+                    }
+                }
             }
         }
 
@@ -903,22 +222,22 @@ impl Decompressor {
             last_state = Some(self.state);
             match self.state {
                 State::ZlibHeader => {
-                    self.fill_buffer(&mut remaining_input);
-                    if self.nbits < 16 {
+                    self.bits.fill_buffer(&mut remaining_input);
+                    if self.bits.nbits < 16 {
                         break;
                     }
 
-                    let input0 = self.peak_bits(8);
-                    let input1 = self.peak_bits(16) >> 8 & 0xff;
+                    let input0 = self.bits.peek_bits(8);
+                    let input1 = (self.bits.peek_bits(16) >> 8) & 0xff;
                     if input0 & 0x0f != 0x08
                         || (input0 & 0xf0) > 0x70
                         || input1 & 0x20 != 0
-                        || (input0 << 8 | input1) % 31 != 0
+                        || ((input0 << 8) | input1) % 31 != 0
                     {
                         return Err(DecompressionError::BadZlibHeader);
                     }
 
-                    self.consume_bits(16);
+                    self.bits.consume_bits(16);
                     self.state = State::BlockHeader;
                 }
                 State::BlockHeader => {
@@ -931,24 +250,37 @@ impl Decompressor {
                     self.read_code_lengths(&mut remaining_input)?;
                 }
                 State::CompressedData => {
-                    output_index =
-                        self.read_compressed(&mut remaining_input, output, output_index)?
+                    let (compresed_block_status, new_output_index) =
+                        self.compression.read_compressed(
+                            &mut self.bits,
+                            &mut remaining_input,
+                            output,
+                            output_index,
+                            &mut self.queued_output,
+                        )?;
+                    output_index = new_output_index;
+                    if compresed_block_status == CompressedBlockStatus::ReachedEndOfBlock {
+                        self.state = match self.last_block {
+                            true => State::Checksum,
+                            false => State::BlockHeader,
+                        };
+                    }
                 }
                 State::UncompressedData => {
                     // Drain any bytes from our buffer.
-                    debug_assert_eq!(self.nbits % 8, 0);
-                    while self.nbits > 0
+                    debug_assert_eq!(self.bits.nbits % 8, 0);
+                    while self.bits.nbits > 0
                         && self.uncompressed_bytes_left > 0
                         && output_index < output.len()
                     {
-                        output[output_index] = self.peak_bits(8) as u8;
-                        self.consume_bits(8);
+                        output[output_index] = self.bits.peek_bits(8) as u8;
+                        self.bits.consume_bits(8);
                         output_index += 1;
                         self.uncompressed_bytes_left -= 1;
                     }
                     // Buffer may contain one additional byte. Clear it to avoid confusion.
-                    if self.nbits == 0 {
-                        self.buffer = 0;
+                    if self.bits.nbits == 0 {
+                        self.bits.buffer = 0;
                     }
 
                     // Copy subsequent bytes directly from the input.
@@ -970,22 +302,23 @@ impl Decompressor {
                     }
                 }
                 State::Checksum => {
-                    self.fill_buffer(&mut remaining_input);
+                    self.bits.fill_buffer(&mut remaining_input);
 
-                    let align_bits = self.nbits % 8;
-                    if self.nbits >= 32 + align_bits {
+                    let align_bits = self.bits.nbits % 8;
+                    if self.bits.nbits >= 32 + align_bits {
                         self.checksum.write(&output[output_position..output_index]);
                         if align_bits != 0 {
-                            self.consume_bits(align_bits);
+                            self.bits.consume_bits(align_bits);
                         }
                         #[cfg(not(fuzzing))]
                         if !self.ignore_adler32
-                            && (self.peak_bits(32) as u32).swap_bytes() != self.checksum.finish()
+                            && (self.bits.peek_bits(32) as u32).swap_bytes()
+                                != self.checksum.finish()
                         {
                             return Err(DecompressionError::WrongChecksum);
                         }
                         self.state = State::Done;
-                        self.consume_bits(32);
+                        self.bits.consume_bits(32);
                         break;
                     }
                 }
@@ -1009,6 +342,739 @@ impl Decompressor {
     pub fn is_done(&self) -> bool {
         self.state == State::Done
     }
+
+    fn read_block_header(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
+        self.bits.fill_buffer(remaining_input);
+        if self.bits.nbits < 10 {
+            return Ok(());
+        }
+
+        let start = self.bits.peek_bits(3);
+        self.last_block = start & 1 != 0;
+        match start >> 1 {
+            0b00 => {
+                let align_bits = (self.bits.nbits - 3) % 8;
+                let header_bits = 3 + 32 + align_bits;
+                if self.bits.nbits < header_bits {
+                    return Ok(());
+                }
+
+                let len = (self.bits.peek_bits(align_bits + 19) >> (align_bits + 3)) as u16;
+                let nlen = (self.bits.peek_bits(header_bits) >> (align_bits + 19)) as u16;
+                if nlen != !len {
+                    return Err(DecompressionError::InvalidUncompressedBlockLength);
+                }
+
+                self.state = State::UncompressedData;
+                self.uncompressed_bytes_left = len;
+                self.bits.consume_bits(header_bits);
+                Ok(())
+            }
+            0b01 => {
+                self.bits.consume_bits(3);
+
+                // Check for an entirely empty blocks which can happen if there are "partial
+                // flushes" in the deflate stream. With fixed huffman codes, the EOF symbol is
+                // 7-bits of zeros so we peak ahead and see if the next 7-bits are all zero.
+                if self.bits.peek_bits(7) == 0 {
+                    self.bits.consume_bits(7);
+                    if self.last_block {
+                        self.state = State::Checksum;
+                        return Ok(());
+                    }
+
+                    // At this point we've consumed the entire block and need to read the next block
+                    // header. If tail call optimization were guaranteed, we could just recurse
+                    // here. But without it, a long sequence of empty fixed-blocks might cause a
+                    // stack overflow. Instead, we consume all empty blocks in a loop and then
+                    // recurse. This is the only recursive call this function, and thus is safe.
+                    while self.bits.nbits >= 10 && self.bits.peek_bits(10) == 0b010 {
+                        self.bits.consume_bits(10);
+                        self.bits.fill_buffer(remaining_input);
+                    }
+                    return self.read_block_header(remaining_input);
+                }
+
+                // Build decoding tables if the previous block wasn't also a fixed block.
+                if !self.fixed_table {
+                    self.fixed_table = true;
+                    assert!(self.compression.litlen_table.len() >= FIXED_LITLEN_TABLE.len());
+                    for chunk in self.compression.litlen_table.chunks_exact_mut(512) {
+                        chunk.copy_from_slice(&FIXED_LITLEN_TABLE);
+                    }
+                    assert!(self.compression.dist_table.len() >= FIXED_DIST_TABLE.len());
+                    for chunk in self.compression.dist_table.chunks_exact_mut(32) {
+                        chunk.copy_from_slice(&FIXED_DIST_TABLE);
+                    }
+                    self.compression.eof_bits = 7;
+                    self.compression.eof_code = 0;
+                    self.compression.eof_mask = 0x7f;
+                }
+
+                self.state = State::CompressedData;
+                Ok(())
+            }
+            0b10 => {
+                if self.bits.nbits < 17 {
+                    return Ok(());
+                }
+
+                self.header.hlit = (self.bits.peek_bits(8) >> 3) as usize + 257;
+                self.header.hdist = (self.bits.peek_bits(13) >> 8) as usize + 1;
+                self.header.hclen = (self.bits.peek_bits(17) >> 13) as usize + 4;
+                if self.header.hlit > 286 {
+                    return Err(DecompressionError::InvalidHlit);
+                }
+                if self.header.hdist > 30 {
+                    return Err(DecompressionError::InvalidHdist);
+                }
+
+                self.bits.consume_bits(17);
+                self.state = State::CodeLengthCodes;
+                self.fixed_table = false;
+                Ok(())
+            }
+            0b11 => Err(DecompressionError::InvalidBlockType),
+            _ => unreachable!(),
+        }
+    }
+
+    fn read_code_length_codes(
+        &mut self,
+        remaining_input: &mut &[u8],
+    ) -> Result<(), DecompressionError> {
+        self.bits.fill_buffer(remaining_input);
+        if self.bits.nbits as usize + remaining_input.len() * 8 < 3 * self.header.hclen {
+            return Ok(());
+        }
+
+        let mut code_length_lengths = [0; 19];
+        for i in 0..self.header.hclen {
+            code_length_lengths[CLCL_ORDER[i]] = self.bits.peek_bits(3) as u8;
+            self.bits.consume_bits(3);
+
+            // We need to refill the buffer after reading 3 * 18 = 54 bits since the buffer holds
+            // between 56 and 63 bits total.
+            if i == 17 {
+                self.bits.fill_buffer(remaining_input);
+            }
+        }
+
+        let mut codes = [0; 19];
+        if !build_table(
+            &code_length_lengths,
+            &[],
+            &mut codes,
+            &mut self.header.table,
+            &mut Vec::new(),
+            false,
+            false,
+        ) {
+            return Err(DecompressionError::BadCodeLengthHuffmanTree);
+        }
+
+        self.state = State::CodeLengths;
+        self.header.num_lengths_read = 0;
+        Ok(())
+    }
+
+    fn read_code_lengths(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
+        let total_lengths = self.header.hlit + self.header.hdist;
+        while self.header.num_lengths_read < total_lengths {
+            self.bits.fill_buffer(remaining_input);
+            if self.bits.nbits < 7 {
+                return Ok(());
+            }
+
+            let code = self.bits.peek_bits(7);
+            let entry = self.header.table[code as usize];
+            let length = (entry & 0x7) as u8;
+            let symbol = (entry >> 16) as u8;
+
+            debug_assert!(length != 0);
+            match symbol {
+                0..=15 => {
+                    self.header.code_lengths[self.header.num_lengths_read] = symbol;
+                    self.header.num_lengths_read += 1;
+                    self.bits.consume_bits(length);
+                }
+                16..=18 => {
+                    let (base_repeat, extra_bits) = match symbol {
+                        16 => (3, 2),
+                        17 => (3, 3),
+                        18 => (11, 7),
+                        _ => unreachable!(),
+                    };
+
+                    if self.bits.nbits < length + extra_bits {
+                        return Ok(());
+                    }
+
+                    let value = match symbol {
+                        16 => {
+                            self.header.code_lengths[self
+                                .header
+                                .num_lengths_read
+                                .checked_sub(1)
+                                .ok_or(DecompressionError::InvalidCodeLengthRepeat)?]
+                            // TODO: is this right?
+                        }
+                        17 => 0,
+                        18 => 0,
+                        _ => unreachable!(),
+                    };
+
+                    let repeat =
+                        (self.bits.peek_bits(length + extra_bits) >> length) as usize + base_repeat;
+                    if self.header.num_lengths_read + repeat > total_lengths {
+                        return Err(DecompressionError::InvalidCodeLengthRepeat);
+                    }
+
+                    for i in 0..repeat {
+                        self.header.code_lengths[self.header.num_lengths_read + i] = value;
+                    }
+                    self.header.num_lengths_read += repeat;
+                    self.bits.consume_bits(length + extra_bits);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        self.header
+            .code_lengths
+            .copy_within(self.header.hlit..total_lengths, 288);
+        for i in self.header.hlit..288 {
+            self.header.code_lengths[i] = 0;
+        }
+        for i in 288 + self.header.hdist..320 {
+            self.header.code_lengths[i] = 0;
+        }
+
+        self.compression
+            .build_tables(self.header.hlit, &self.header.code_lengths)?;
+        self.state = State::CompressedData;
+        Ok(())
+    }
+}
+
+impl<const LITLEN_TABLE_SIZE: usize, const DIST_TABLE_SIZE: usize>
+    CompressedBlock<LITLEN_TABLE_SIZE, DIST_TABLE_SIZE>
+{
+    fn build_tables(&mut self, hlit: usize, code_lengths: &[u8]) -> Result<(), DecompressionError> {
+        // If there is no code assigned for the EOF symbol then the bitstream is invalid.
+        if code_lengths[256] == 0 {
+            // TODO: Return a dedicated error in this case.
+            return Err(DecompressionError::BadLiteralLengthHuffmanTree);
+        }
+
+        let mut codes = [0; 288];
+        self.secondary_table.clear();
+        if !huffman::build_table(
+            &code_lengths[..hlit],
+            &LITLEN_TABLE_ENTRIES,
+            &mut codes[..hlit],
+            &mut *self.litlen_table,
+            &mut self.secondary_table,
+            false,
+            true,
+        ) {
+            return Err(DecompressionError::BadCodeLengthHuffmanTree);
+        }
+
+        self.eof_code = codes[256];
+        self.eof_mask = (1 << code_lengths[256]) - 1;
+        self.eof_bits = code_lengths[256];
+
+        // Build the distance code table.
+        let lengths = &code_lengths[288..320];
+        if lengths == [0; 32] {
+            self.dist_table.fill(0);
+        } else {
+            let mut dist_codes = [0; 32];
+            if !huffman::build_table(
+                lengths,
+                &tables::DISTANCE_TABLE_ENTRIES,
+                &mut dist_codes,
+                &mut *self.dist_table,
+                &mut self.dist_secondary_table,
+                true,
+                false,
+            ) {
+                return Err(DecompressionError::BadDistanceHuffmanTree);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns:
+    /// - Whether this compressed block ended or not
+    /// - The new value of `output_index`
+    fn read_compressed(
+        &self,
+        bit_buffer: &mut BitBuffer,
+        remaining_input: &mut &[u8],
+        output: &mut [u8],
+        mut output_index: usize,
+        queued_output: &mut Option<QueuedOutput>,
+    ) -> Result<(CompressedBlockStatus, usize), DecompressionError> {
+        // `litlen_table_mask` (and `dist_table_mask`) calculation assumes that `LITLEN_TABLE_SIZE`
+        // (or `DIST_TABLE_SIZE`) is a power of two.
+        assert!(LITLEN_TABLE_SIZE.count_ones() == 1);
+        assert!(DIST_TABLE_SIZE.count_ones() == 1);
+        let litlen_table_mask = (LITLEN_TABLE_SIZE as u64) - 1;
+        let litlen_table_bits = LITLEN_TABLE_SIZE.trailing_zeros();
+        let dist_table_mask = (DIST_TABLE_SIZE as u64) - 1;
+        let dist_table_bits = DIST_TABLE_SIZE.trailing_zeros();
+        // Lower bound on table sizes, because 1a) RFC1951 uses at most 15 bits for codewords and
+        // 1b) we can fit at most 8 bits of `overflow_bits_mask` in the last byte of a primary
+        // table entry.
+        assert!(litlen_table_bits + 8 >= 15);
+        assert!(dist_table_bits + 8 >= 15);
+
+        // Fast decoding loop.
+        //
+        // This loop is optimized for speed and is the main decoding loop for the decompressor,
+        // which is used when there are at least 8 bytes of input and output data available. It
+        // assumes that the bitbuffer is full (nbits >= 56) and that litlen_entry has been loaded.
+        //
+        // These assumptions enable a few optimizations:
+        // - Nearly all checks for nbits are avoided.
+        // - Checking the input size is optimized out in the refill function call.
+        // - The litlen_entry for the next loop iteration can be loaded in parallel with refilling
+        //   the bit buffer. This is because when the input is non-empty, the bit buffer actually
+        //   has 64-bits of valid data (even though nbits will be in 56..=63).
+        bit_buffer.fill_buffer(remaining_input);
+        let mut litlen_entry = self.litlen_table[(bit_buffer.buffer & litlen_table_mask) as usize];
+        while output_index + 8 <= output.len() && remaining_input.len() >= 8 {
+            // First check whether the next symbol is a literal. This code does up to 2 additional
+            // table lookups to decode more literals.
+            let mut bits;
+            let mut litlen_code_bits = litlen_entry as u8;
+            if litlen_entry & LITERAL_ENTRY != 0 {
+                let litlen_entry2 = self.litlen_table
+                    [((bit_buffer.buffer >> litlen_code_bits) & litlen_table_mask) as usize];
+                let litlen_code_bits2 = litlen_entry2 as u8;
+                let litlen_entry3 = self.litlen_table[((bit_buffer.buffer
+                    >> (litlen_code_bits + litlen_code_bits2))
+                    & litlen_table_mask)
+                    as usize];
+                let litlen_code_bits3 = litlen_entry3 as u8;
+                let litlen_entry4 = self.litlen_table[((bit_buffer.buffer
+                    >> (litlen_code_bits + litlen_code_bits2 + litlen_code_bits3))
+                    & litlen_table_mask)
+                    as usize];
+
+                let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
+                output[output_index] = (litlen_entry >> 16) as u8;
+                output[output_index + 1] = (litlen_entry >> 24) as u8;
+                output_index += advance_output_bytes;
+
+                if litlen_entry2 & LITERAL_ENTRY != 0 {
+                    let advance_output_bytes2 = ((litlen_entry2 & 0xf00) >> 8) as usize;
+                    output[output_index] = (litlen_entry2 >> 16) as u8;
+                    output[output_index + 1] = (litlen_entry2 >> 24) as u8;
+                    output_index += advance_output_bytes2;
+
+                    if litlen_entry3 & LITERAL_ENTRY != 0 {
+                        let advance_output_bytes3 = ((litlen_entry3 & 0xf00) >> 8) as usize;
+                        output[output_index] = (litlen_entry3 >> 16) as u8;
+                        output[output_index + 1] = (litlen_entry3 >> 24) as u8;
+                        output_index += advance_output_bytes3;
+
+                        litlen_entry = litlen_entry4;
+                        bit_buffer
+                            .consume_bits(litlen_code_bits + litlen_code_bits2 + litlen_code_bits3);
+                        bit_buffer.fill_buffer(remaining_input);
+                        continue;
+                    } else {
+                        bit_buffer.consume_bits(litlen_code_bits + litlen_code_bits2);
+                        litlen_entry = litlen_entry3;
+                        litlen_code_bits = litlen_code_bits3;
+                        bit_buffer.fill_buffer(remaining_input);
+                        bits = bit_buffer.buffer;
+                    }
+                } else {
+                    bit_buffer.consume_bits(litlen_code_bits);
+                    bits = bit_buffer.buffer;
+                    litlen_entry = litlen_entry2;
+                    litlen_code_bits = litlen_code_bits2;
+                    if bit_buffer.nbits < 48 {
+                        bit_buffer.fill_buffer(remaining_input);
+                    }
+                }
+            } else {
+                bits = bit_buffer.buffer;
+            }
+
+            // The next symbol is either a 13+ bit literal, back-reference, or an EOF symbol.
+            let (length_base, length_extra_bits, litlen_code_bits) =
+                if litlen_entry & EXCEPTIONAL_ENTRY == 0 {
+                    (
+                        litlen_entry >> 16,
+                        (litlen_entry >> 8) as u8,
+                        litlen_code_bits,
+                    )
+                } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
+                    let secondary_table_index = (litlen_entry >> 16)
+                        + ((bits >> litlen_table_bits) as u32 & (litlen_entry & 0xff));
+                    let secondary_entry = self.secondary_table[secondary_table_index as usize];
+                    let litlen_symbol = secondary_entry >> 4;
+                    let litlen_code_bits = (secondary_entry & 0xf) as u8;
+
+                    match litlen_symbol {
+                        0..=255 => {
+                            bit_buffer.consume_bits(litlen_code_bits);
+                            litlen_entry =
+                                self.litlen_table[(bit_buffer.buffer & litlen_table_mask) as usize];
+                            bit_buffer.fill_buffer(remaining_input);
+                            output[output_index] = litlen_symbol as u8;
+                            output_index += 1;
+                            continue;
+                        }
+                        256 => {
+                            bit_buffer.consume_bits(litlen_code_bits);
+                            return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
+                        }
+                        _ => (
+                            LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
+                            LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257],
+                            litlen_code_bits,
+                        ),
+                    }
+                } else if litlen_code_bits == 0 {
+                    return Err(DecompressionError::InvalidLiteralLengthCode);
+                } else {
+                    bit_buffer.consume_bits(litlen_code_bits);
+                    return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
+                };
+            bits >>= litlen_code_bits;
+
+            let length_extra_mask = (1 << length_extra_bits) - 1;
+            let length = length_base as usize + (bits & length_extra_mask) as usize;
+            bits >>= length_extra_bits;
+
+            let dist_entry = self.dist_table[(bits & dist_table_mask) as usize];
+            let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry & LITERAL_ENTRY != 0 {
+                (
+                    (dist_entry >> 16) as u16,
+                    (dist_entry >> 8) as u8 & 0xf,
+                    dist_entry as u8,
+                )
+            } else if dist_entry >> 8 == 0 {
+                return Err(DecompressionError::InvalidDistanceCode);
+            } else {
+                let secondary_table_index =
+                    (dist_entry >> 16) + ((bits >> dist_table_bits) as u32 & (dist_entry & 0xff));
+                let secondary_entry = self.dist_secondary_table[secondary_table_index as usize];
+                let dist_symbol = (secondary_entry >> 4) as usize;
+                if dist_symbol >= 30 {
+                    return Err(DecompressionError::InvalidDistanceCode);
+                }
+
+                (
+                    DIST_SYM_TO_DIST_BASE[dist_symbol],
+                    DIST_SYM_TO_DIST_EXTRA[dist_symbol],
+                    (secondary_entry & 0xf) as u8,
+                )
+            };
+            bits >>= dist_code_bits;
+
+            let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1)) as usize;
+            if dist > output_index {
+                return Err(DecompressionError::DistanceTooFarBack);
+            }
+
+            bit_buffer.consume_bits(
+                litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits,
+            );
+            bit_buffer.fill_buffer(remaining_input);
+            litlen_entry = self.litlen_table[(bit_buffer.buffer & litlen_table_mask) as usize];
+
+            let copy_length = length.min(output.len() - output_index);
+            if dist == 1 {
+                let last = output[output_index - 1];
+                output[output_index..][..copy_length].fill(last);
+
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    *queued_output = Some(QueuedOutput::Rle { data: last, length });
+                    output_index = output.len();
+                    break;
+                }
+            } else if output_index + length + 15 <= output.len() {
+                let start = output_index - dist;
+                output.copy_within(start..start + 16, output_index);
+
+                if length > 16 || dist < 16 {
+                    for i in (0..length).step_by(dist.min(16)).skip(1) {
+                        output.copy_within(start + i..start + i + 16, output_index + i);
+                    }
+                }
+            } else {
+                if dist < copy_length {
+                    for i in 0..copy_length {
+                        output[output_index + i] = output[output_index + i - dist];
+                    }
+                } else {
+                    output.copy_within(
+                        output_index - dist..output_index + copy_length - dist,
+                        output_index,
+                    )
+                }
+
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    *queued_output = Some(QueuedOutput::Backref { dist, length });
+                    output_index = output.len();
+                    break;
+                }
+            }
+            output_index += copy_length;
+        }
+
+        // Careful decoding loop.
+        //
+        // This loop processes the remaining input when we're too close to the end of the input or
+        // output to use the fast loop.
+        loop {
+            bit_buffer.fill_buffer(remaining_input);
+            if output_index == output.len() {
+                break;
+            }
+
+            let mut bits = bit_buffer.buffer;
+            let litlen_entry = self.litlen_table[(bits & litlen_table_mask) as usize];
+            let litlen_code_bits = litlen_entry as u8;
+
+            if litlen_entry & LITERAL_ENTRY != 0 {
+                // Fast path: the next symbol is <= `litlen_table_bits` bits and a literal, the
+                // table specifies the output bytes and we can directly write them to the output
+                // buffer.
+                let advance_output_bytes = ((litlen_entry & 0xf00) >> 8) as usize;
+
+                if bit_buffer.nbits < litlen_code_bits {
+                    break;
+                } else if output_index + 1 < output.len() {
+                    output[output_index] = (litlen_entry >> 16) as u8;
+                    output[output_index + 1] = (litlen_entry >> 24) as u8;
+                    output_index += advance_output_bytes;
+                    bit_buffer.consume_bits(litlen_code_bits);
+                    continue;
+                } else if output_index + advance_output_bytes == output.len() {
+                    debug_assert_eq!(advance_output_bytes, 1);
+                    output[output_index] = (litlen_entry >> 16) as u8;
+                    output_index += 1;
+                    bit_buffer.consume_bits(litlen_code_bits);
+                    break;
+                } else {
+                    debug_assert_eq!(advance_output_bytes, 2);
+                    output[output_index] = (litlen_entry >> 16) as u8;
+                    *queued_output = Some(QueuedOutput::Rle {
+                        data: (litlen_entry >> 24) as u8,
+                        length: NonZeroUsize::new(1).unwrap(),
+                    });
+                    output_index += 1;
+                    bit_buffer.consume_bits(litlen_code_bits);
+                    break;
+                }
+            }
+
+            let (length_base, length_extra_bits, litlen_code_bits) =
+                if litlen_entry & EXCEPTIONAL_ENTRY == 0 {
+                    (
+                        litlen_entry >> 16,
+                        (litlen_entry >> 8) as u8,
+                        litlen_code_bits,
+                    )
+                } else if litlen_entry & SECONDARY_TABLE_ENTRY != 0 {
+                    let secondary_table_index = (litlen_entry >> 16)
+                        + ((bits >> litlen_table_bits) as u32 & (litlen_entry & 0xff));
+                    let secondary_entry = self.secondary_table[secondary_table_index as usize];
+                    let litlen_symbol = secondary_entry >> 4;
+                    let litlen_code_bits = (secondary_entry & 0xf) as u8;
+
+                    if bit_buffer.nbits < litlen_code_bits {
+                        break;
+                    } else if litlen_symbol < 256 {
+                        bit_buffer.consume_bits(litlen_code_bits);
+                        output[output_index] = litlen_symbol as u8;
+                        output_index += 1;
+                        continue;
+                    } else if litlen_symbol == 256 {
+                        bit_buffer.consume_bits(litlen_code_bits);
+                        return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
+                    }
+
+                    (
+                        LEN_SYM_TO_LEN_BASE[litlen_symbol as usize - 257] as u32,
+                        LEN_SYM_TO_LEN_EXTRA[litlen_symbol as usize - 257],
+                        litlen_code_bits,
+                    )
+                } else if litlen_code_bits == 0 {
+                    return Err(DecompressionError::InvalidLiteralLengthCode);
+                } else {
+                    if bit_buffer.nbits < litlen_code_bits {
+                        break;
+                    }
+                    bit_buffer.consume_bits(litlen_code_bits);
+                    return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
+                };
+            bits >>= litlen_code_bits;
+
+            let length_extra_mask = (1 << length_extra_bits) - 1;
+            let length = length_base as usize + (bits & length_extra_mask) as usize;
+            bits >>= length_extra_bits;
+
+            let dist_entry = self.dist_table[(bits & dist_table_mask) as usize];
+            let (dist_base, dist_extra_bits, dist_code_bits) = if dist_entry & LITERAL_ENTRY != 0 {
+                (
+                    (dist_entry >> 16) as u16,
+                    (dist_entry >> 8) as u8 & 0xf,
+                    dist_entry as u8,
+                )
+            } else if bit_buffer.nbits
+                > litlen_code_bits + length_extra_bits + dist_table_bits as u8
+            {
+                if dist_entry >> 8 == 0 {
+                    return Err(DecompressionError::InvalidDistanceCode);
+                }
+
+                let secondary_table_index =
+                    (dist_entry >> 16) + ((bits >> dist_table_bits) as u32 & (dist_entry & 0xff));
+                let secondary_entry = self.dist_secondary_table[secondary_table_index as usize];
+                let dist_symbol = (secondary_entry >> 4) as usize;
+                if dist_symbol >= 30 {
+                    return Err(DecompressionError::InvalidDistanceCode);
+                }
+
+                (
+                    DIST_SYM_TO_DIST_BASE[dist_symbol],
+                    DIST_SYM_TO_DIST_EXTRA[dist_symbol],
+                    (secondary_entry & 0xf) as u8,
+                )
+            } else {
+                break;
+            };
+            bits >>= dist_code_bits;
+
+            let dist = dist_base as usize + (bits & ((1 << dist_extra_bits) - 1)) as usize;
+            let total_bits =
+                litlen_code_bits + length_extra_bits + dist_code_bits + dist_extra_bits;
+
+            if bit_buffer.nbits < total_bits {
+                break;
+            } else if dist > output_index {
+                return Err(DecompressionError::DistanceTooFarBack);
+            }
+
+            bit_buffer.consume_bits(total_bits);
+
+            let copy_length = length.min(output.len() - output_index);
+            if dist == 1 {
+                let last = output[output_index - 1];
+                output[output_index..][..copy_length].fill(last);
+
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    *queued_output = Some(QueuedOutput::Rle { data: last, length });
+                    output_index = output.len();
+                    break;
+                }
+            } else if output_index + length + 15 <= output.len() {
+                let start = output_index - dist;
+                output.copy_within(start..start + 16, output_index);
+
+                if length > 16 || dist < 16 {
+                    for i in (0..length).step_by(dist.min(16)).skip(1) {
+                        output.copy_within(start + i..start + i + 16, output_index + i);
+                    }
+                }
+            } else {
+                if dist < copy_length {
+                    for i in 0..copy_length {
+                        output[output_index + i] = output[output_index + i - dist];
+                    }
+                } else {
+                    output.copy_within(
+                        output_index - dist..output_index + copy_length - dist,
+                        output_index,
+                    )
+                }
+
+                if let Ok(length) = NonZeroUsize::try_from(length - copy_length) {
+                    *queued_output = Some(QueuedOutput::Backref { dist, length });
+                    output_index = output.len();
+                    break;
+                }
+            }
+            output_index += copy_length;
+        }
+
+        if queued_output.is_none()
+            && bit_buffer.nbits >= 15
+            && bit_buffer.peek_bits(15) as u16 & self.eof_mask == self.eof_code
+        {
+            bit_buffer.consume_bits(self.eof_bits);
+            return Ok((CompressedBlockStatus::ReachedEndOfBlock, output_index));
+        }
+
+        Ok((CompressedBlockStatus::MoreDataPresent, output_index))
+    }
+}
+
+#[derive(Debug)]
+struct BitBuffer {
+    buffer: u64,
+    nbits: u8,
+}
+
+impl BitBuffer {
+    fn new() -> Self {
+        Self {
+            buffer: 0,
+            nbits: 0,
+        }
+    }
+
+    fn fill_buffer(&mut self, input: &mut &[u8]) {
+        if input.len() >= 8 {
+            let mut bits = self.nbits & 63; // limits `bits` to 63 or less, elides bounds checks
+            self.buffer |= u64::from_le_bytes(input[..8].try_into().unwrap()) << bits;
+            *input = &input[((63 - bits) / 8) as usize..];
+            bits |= 56;
+            self.nbits = bits;
+        } else {
+            let nbytes = input.len().min((63 - self.nbits as usize) / 8);
+            let mut input_data = [0; 8];
+            input_data[..nbytes].copy_from_slice(&input[..nbytes]);
+            self.buffer |= u64::from_le_bytes(input_data)
+                .checked_shl(self.nbits as u32)
+                .unwrap_or(0);
+            self.nbits += nbytes as u8 * 8;
+            *input = &input[nbytes..];
+        }
+    }
+
+    fn peek_bits(&mut self, nbits: u8) -> u64 {
+        debug_assert!(nbits <= 56 && nbits <= self.nbits);
+        self.buffer & ((1u64 << nbits) - 1)
+    }
+
+    fn consume_bits(&mut self, nbits: u8) {
+        debug_assert!(self.nbits >= nbits);
+        self.buffer >>= nbits;
+        self.nbits -= nbits;
+    }
+}
+
+#[derive(Debug)]
+enum QueuedOutput {
+    Rle { data: u8, length: NonZeroUsize },
+    Backref { dist: usize, length: NonZeroUsize },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CompressedBlockStatus {
+    MoreDataPresent,
+    ReachedEndOfBlock,
 }
 
 /// Decompress the given data.
@@ -1146,29 +1212,20 @@ mod tests {
     }
 
     #[test]
-    fn fdeflate_table() {
+    fn fixed_tables() {
         let mut compression = CompressedBlock {
-            litlen_table: [0; 4096],
-            dist_table: [0; 512],
-            dist_symbol_lengths: [0; 30],
-            dist_symbol_masks: [0; 30],
-            dist_symbol_codes: [0; 30],
+            litlen_table: Box::new([0; DEFAULT_LITLEN_TABLE_SIZE]),
+            dist_table: Box::new([0; DEFAULT_DIST_TABLE_SIZE]),
             secondary_table: Vec::new(),
+            dist_secondary_table: Vec::new(),
             eof_code: 0,
             eof_mask: 0,
             eof_bits: 0,
         };
-        let mut lengths = tables::HUFFMAN_LENGTHS.to_vec();
-        lengths.resize(288, 0);
-        lengths.push(1);
-        lengths.resize(320, 0);
-        Decompressor::build_tables(286, &lengths, &mut compression, 11).unwrap();
+        compression.build_tables(288, &FIXED_CODE_LENGTHS).unwrap();
 
-        assert_eq!(
-            compression, FDEFLATE_COMPRESSED_BLOCK,
-            "{:#x?}",
-            compression
-        );
+        assert_eq!(compression.litlen_table[..512], FIXED_LITLEN_TABLE);
+        assert_eq!(compression.dist_table[..32], FIXED_DIST_TABLE);
     }
 
     #[test]
@@ -1277,6 +1334,7 @@ mod tests {
     }
 
     mod test_utils;
+    use tables::FIXED_CODE_LENGTHS;
     use test_utils::{decompress_by_chunks, TestDecompressionError};
 
     fn verify_no_sensitivity_to_input_chunking(
