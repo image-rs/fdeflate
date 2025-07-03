@@ -66,7 +66,7 @@ impl MediumCompressor {
 
                     (length, distance, match_start) = self
                         .match_finder
-                        .get_and_insert(&data, last_match, ip, current, 4);
+                        .get_and_insert(&data, last_match, ip, current, 3);
                 }
 
                 if length >= 3 {

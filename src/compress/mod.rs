@@ -442,9 +442,9 @@ impl<W: Write> Compressor<W> {
             1 => CompressorInner::Fast(FastCompressor::new(4)),
             2 => CompressorInner::Fast(FastCompressor::new(9)),
             3 => CompressorInner::Medium(MediumCompressor::new(16, 8, 6, 4, 6)),
-            4 => CompressorInner::Medium(MediumCompressor::new(32, 8, 12, 3, 9)),
-            5 => CompressorInner::Medium(MediumCompressor::new(64, 12, 16, 3, 9)),
-            6 => CompressorInner::Medium(MediumCompressor::new(128, 16, 16, 3, 12)),
+            4 => CompressorInner::Medium(MediumCompressor::new(32, 8, 12, 4, 9)),
+            5 => CompressorInner::Medium(MediumCompressor::new(64, 12, 16, 4, 9)),
+            6 => CompressorInner::Medium(MediumCompressor::new(128, 16, 16, 4, 12)),
             7.. => CompressorInner::Slow(SlowCompressor::new()),
         };
 
