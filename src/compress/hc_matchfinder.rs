@@ -54,7 +54,7 @@ impl HashChainMatchFinder {
             hash_table: vec![0; CACHE_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
             search_depth,
-            good_length: 32,
+            good_length: 8,
             nice_length,
             hash_mask: if min_match == 8 {
                 u64::MAX

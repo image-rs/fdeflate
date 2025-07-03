@@ -1,17 +1,20 @@
-use fast::FastCompressor;
-use hc_matchfinder::HashChainMatchFinder;
-use ht_matchfinder::HashTableMatchFinder;
-use simd_adler32::Adler32;
-use slow::SlowCompressor;
 use std::{
     collections::BinaryHeap,
     io::{self, Seek, SeekFrom, Write},
 };
 
+use simd_adler32::Adler32;
+
 use crate::tables::{
     BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_LEN_EXTRA,
     LENGTH_TO_SYMBOL,
 };
+
+use fast::FastCompressor;
+use hc_matchfinder::HashChainMatchFinder;
+use ht_matchfinder::HashTableMatchFinder;
+use medium::MediumCompressor;
+use slow::SlowCompressor;
 
 mod bt_matchfinder;
 mod hc_matchfinder;
@@ -20,6 +23,7 @@ mod ht_matchfinder;
 mod fast;
 mod medium;
 mod slow;
+pub mod ultrafast;
 
 fn build_huffman_tree(
     frequencies: &[u32],
@@ -211,31 +215,21 @@ fn write_block<W: Write>(
             }
         }
     }
-    write_block_inner(writer, data, symbols, eof, &frequencies, &dist_frequencies)
-}
 
-fn write_block_inner<W: Write>(
-    writer: &mut BitWriter<W>,
-    data: &[u8],
-    symbols: &[Symbol],
-    eof: bool,
-    frequencies: &[u32; 286],
-    dist_frequencies: &[u32; 30],
-) -> io::Result<()> {
     let mut lengths = [0u8; 286];
     let mut codes = [0u16; 286];
-    build_huffman_tree(frequencies, &mut lengths, &mut codes, 15);
+    build_huffman_tree(&frequencies, &mut lengths, &mut codes, 15);
 
     let mut dist_lengths = [0u8; 30];
     let mut dist_codes = [0u16; 30];
-    build_huffman_tree(dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
+    build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
 
-    let mut num_litlen_codes = 286;
+    let num_litlen_codes = 286;
     // while num_litlen_codes > 257 && lengths[num_litlen_codes - 1] == 0 {
     //     num_litlen_codes -= 1;
     // }
 
-    let mut num_dist_codes = 30;
+    let num_dist_codes = 30;
     // while num_dist_codes > 1 && dist_lengths[num_dist_codes - 1] == 0 {
     //     num_dist_codes -= 1;
     // }
@@ -337,6 +331,7 @@ fn write_block_inner<W: Write>(
 enum CompressorInner {
     Stored,
     Fast(FastCompressor),
+    Medium(MediumCompressor),
     Slow(SlowCompressor),
 }
 impl CompressorInner {
@@ -349,6 +344,7 @@ impl CompressorInner {
         match self {
             Self::Stored => Self::compress_stored(writer, data, eof),
             Self::Fast(inner) => inner.compress(writer, data),
+            Self::Medium(inner) => inner.compress(writer, data),
             Self::Slow(inner) => inner.compress(writer, data),
         }
     }
@@ -433,13 +429,23 @@ pub struct Compressor<W: Write> {
 }
 impl<W: Write> Compressor<W> {
     /// Create a new Compressor.
-    pub fn new(mut writer: W) -> io::Result<Self> {
+    pub fn new(writer: W) -> io::Result<Self> {
+        Self::with_level(writer, 1)
+    }
+
+    /// Create a new Compressor with the specified compression level.
+    pub fn with_level(mut writer: W, level: u8) -> io::Result<Self> {
         writer.write_all(&[0x78, 0x01])?; // zlib header
 
-        let inner = match 1u8 {
+        let inner = match level {
             0 => CompressorInner::Stored,
-            1..=5 => CompressorInner::Fast(FastCompressor::new()),
-            6.. => CompressorInner::Slow(SlowCompressor::new()),
+            1 => CompressorInner::Fast(FastCompressor::new(4)),
+            2 => CompressorInner::Fast(FastCompressor::new(9)),
+            3 => CompressorInner::Medium(MediumCompressor::new(16, 8, 6, 4, 6)),
+            4 => CompressorInner::Medium(MediumCompressor::new(32, 8, 12, 3, 9)),
+            5 => CompressorInner::Medium(MediumCompressor::new(64, 12, 16, 3, 9)),
+            6 => CompressorInner::Medium(MediumCompressor::new(128, 16, 16, 3, 12)),
+            7.. => CompressorInner::Slow(SlowCompressor::new()),
         };
 
         Ok(Self {
@@ -560,7 +566,13 @@ impl<W> StoredOnlyCompressor<W> {
 
 /// Compresses the given data.
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
-    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
+    compress_to_vec_with_level(input, 1)
+}
+
+/// Compresses the given data with the specified compression level.
+pub fn compress_to_vec_with_level(input: &[u8], level: u8) -> Vec<u8> {
+    let mut compressor =
+        Compressor::with_level(Vec::with_capacity(input.len() / 4), level).unwrap();
     compressor.write_data(input).unwrap();
     let mut compressed = compressor.finish().unwrap();
 

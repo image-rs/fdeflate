@@ -2,24 +2,18 @@ use std::io::{self, Write};
 
 use super::{BitWriter, HashChainMatchFinder, Symbol};
 
-pub(super) struct FastCompressor {
+pub(super) struct MediumCompressor {
     match_finder: HashChainMatchFinder,
-
-    // min_match: u8,
     skip_ahead_shift: u8,
-    // search_depth: u16,
-    // nice_length: u16,
+    max_lazy: u16,
 }
 
-impl FastCompressor {
-    pub fn new() -> Self {
+impl MediumCompressor {
+    pub fn new(search_depth: u16, nice_length: u16, max_lazy: u16, min_match: u8, skip_ahead_shift: u8) -> Self {
         Self {
-            match_finder: HashChainMatchFinder::new(1, 16, 8),
-
-            // min_match: 4,
-            skip_ahead_shift: 6,
-            // search_depth: 64,
-            // nice_length: 258,
+            match_finder: HashChainMatchFinder::new(search_depth, nice_length, min_match),
+            skip_ahead_shift,
+            max_lazy,
         }
     }
 
@@ -76,23 +70,23 @@ impl FastCompressor {
                 }
 
                 if length >= 3 {
-                    // if match_start + length as usize > ip + 1
-                    //     && length < max_lazy
-                    //     && ip + length as usize + 9 <= data.len()
-                    // {
-                    //     ip += 1;
-                    //     let (next_length, next_distance, next_match_start) =
-                    //         matches.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
-                    //     if next_length > 0 && match_start + 1 >= next_match_start {
-                    //         distance = next_distance;
-                    //         length = next_length;
-                    //         match_start = next_match_start;
+                    if match_start + length as usize > ip + 1
+                        && length < self.max_lazy
+                        && ip + length as usize + 9 <= data.len()
+                    {
+                        ip += 1;
+                        let (next_length, next_distance, next_match_start) =
+                            self.match_finder.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
+                        if next_length > 0 && match_start + 1 >= next_match_start {
+                            distance = next_distance;
+                            length = next_length;
+                            match_start = next_match_start;
 
-                    //         if next_match_start > match_start {
-                    //             continue;
-                    //         }
-                    //     }
-                    // }
+                            if next_match_start > match_start {
+                                continue;
+                            }
+                        }
+                    }
                     assert!(last_match <= match_start);
 
                     symbols.push(Symbol::LiteralRun {
