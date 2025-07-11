@@ -5,33 +5,29 @@ use super::{BitWriter, HashChainMatchFinder, Symbol};
 pub(super) struct MediumCompressor {
     match_finder: HashChainMatchFinder,
     skip_ahead_shift: u8,
-    max_lazy: u16,
 }
 
 impl MediumCompressor {
-    pub fn new(search_depth: u16, nice_length: u16, max_lazy: u16, min_match: u8, skip_ahead_shift: u8) -> Self {
+    pub fn new(search_depth: u16, nice_length: u16, skip_ahead_shift: u8) -> Self {
         Self {
-            match_finder: HashChainMatchFinder::new(search_depth, nice_length, min_match),
+            match_finder: HashChainMatchFinder::new(search_depth, nice_length, 4),
             skip_ahead_shift,
-            max_lazy,
         }
     }
 
     pub fn compress<W: Write>(&mut self, writer: &mut BitWriter<W>, data: &[u8]) -> io::Result<()> {
-        let mut ip = 0;
-
-        let mut length = 0;
-        let mut distance = 0;
-        let mut match_start = 0;
+        let mut ip = 0; // Points at the next byte to hash/lookup for.
+        let mut last_match = 0; //ip;
 
         while ip < data.len() {
+            let mut length = 0;
+            let mut distance = 0;
+            let mut match_start = 0;
+
             let mut symbols = Vec::new();
-
-            let mut last_match = ip;
-            'outer: while symbols.len() < 16384 && ip + 8 <= data.len() {
-                let current = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
-
+            while symbols.len() < 16384 && ip + 8 <= data.len() {
                 if length == 0 {
+                    let current = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
                     if current & 0xFF_FFFF_FFFF == 0 {
                         while ip > last_match && data[ip - 1] == 0 {
                             ip -= 1;
@@ -67,69 +63,77 @@ impl MediumCompressor {
                     (length, distance, match_start) = self
                         .match_finder
                         .get_and_insert(&data, last_match, ip, current, 3);
+                    ip += 1;
                 }
 
-                if length >= 3 {
-                    if match_start + length as usize > ip + 1
-                        && length < self.max_lazy
-                        && ip + length as usize + 9 <= data.len()
-                    {
-                        ip += 1;
-                        let (next_length, next_distance, next_match_start) =
-                            self.match_finder.get_and_insert(&data, last_match, ip, current >> 8, length + 1);
-                        if next_length > 0 && match_start + 1 >= next_match_start {
-                            distance = next_distance;
-                            length = next_length;
-                            match_start = next_match_start;
+                // If we haven't found a match in a while, start skipping ahead by emitting multiple
+                // literals at once.
+                if length < 3 {
+                    ip += (ip - last_match) >> self.skip_ahead_shift;
+                    continue;
+                }
 
-                            if next_match_start > match_start {
-                                continue;
-                            }
-                        }
-                    }
-                    assert!(last_match <= match_start);
+                assert!(last_match <= ip);
+                assert!(last_match <= match_start,);
+                let (mut next_length, mut next_distance, mut next_match_start) = (0, 0, 0);
 
-                    symbols.push(Symbol::LiteralRun {
-                        start: last_match as u32,
-                        end: match_start as u32,
-                    });
-
-                    symbols.push(Symbol::Backref {
-                        length: length as u16,
-                        distance,
-                        dist_sym: super::distance_to_dist_sym(distance),
-                    });
-
-                    let match_end = match_start + length as usize;
+                let match_end = match_start + length as usize;
+                if match_end > ip {
+                    // Insert match finder entries for the current match.
                     let insert_end = (match_end - 2).min(data.len() - 8);
-                    let insert_start = (ip + 1).max(insert_end.saturating_sub(8));
+                    let insert_start = ip.max(insert_end.saturating_sub(16));
                     for j in (insert_start..insert_end).step_by(3) {
                         let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
                         self.match_finder.insert(v, j);
                         self.match_finder.insert(v >> 8, j + 1);
                         self.match_finder.insert(v >> 16, j + 2);
                     }
-
-                    // if insert_end >= insert_start + 3 {
-                    //     let v = u64::from_le_bytes(data[insert_end - 3..][..8].try_into().unwrap());
-                    //     matches.insert(v, insert_end - 3);
-                    //     matches.insert(v >> 8, insert_end - 2);
-                    //     matches.insert(v >> 16, insert_end - 1);
-                    // }
-
                     ip = match_end;
-                    last_match = ip;
 
-                    length = 0;
-                    continue 'outer;
+                    // Do a lookup at the position following the match. We'll need this even if we
+                    // accept the match, so it doesn't cost anything.
+                    if ip + 8 <= data.len() {
+                        let next = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
+                        (next_length, next_distance, next_match_start) = self
+                            .match_finder
+                            .get_and_insert(&data, last_match, ip, next, 3);
+                        ip += 1;
+                    }
                 }
 
-                // self.match_finder.insert(current >> 8, ip + 1);
-                // self.match_finder.insert(current >> 16, ip + 2);
+                // Insert the current match, unless the next match starts too close to the current
+                // one. Because we expand matches backwards, the next match might almost completely
+                // overlap. If so, it'll probably be cheaper to emit an extra literal rather than an
+                // extra backref.
+                if next_length < 3 || next_match_start > match_start + 1 {
+                    assert!(last_match <= match_start);
+                    symbols.push(Symbol::LiteralRun {
+                        start: last_match as u32,
+                        end: match_start as u32,
+                    });
+                    symbols.push(Symbol::Backref {
+                        length: length as u16,
+                        distance,
+                        dist_sym: super::distance_to_dist_sym(distance),
+                    });
+                    last_match = match_start + length as usize;
 
-                // If we haven't found a match in a while, start skipping ahead by emitting multiple
-                // literals at once.
-                ip += 1 + ((ip - last_match) >> self.skip_ahead_shift);
+                    // If the next match starts before the end of the current match, we need to
+                    // adjust the next match length and start position.
+                    if next_length > 0 && next_match_start < last_match {
+                        assert!(next_length >= 3);
+                        next_length -= (last_match - next_match_start) as u16;
+                        next_match_start = last_match;
+                        if next_length < 4 {
+                            next_length = 0;
+                        }
+                    }
+                }
+
+                // Advance to the next match (which might have a length of zero)
+                length = next_length;
+                match_start = next_match_start;
+                distance = next_distance;
             }
             if data.len() < ip + 8 {
                 symbols.push(Symbol::LiteralRun {
@@ -138,7 +142,6 @@ impl MediumCompressor {
                 });
                 ip = data.len();
             }
-
             super::write_block(writer, data, &symbols, ip == data.len())?;
         }
 

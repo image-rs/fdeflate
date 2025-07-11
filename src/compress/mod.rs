@@ -171,11 +171,11 @@ fn compute_hash3(v: u32) -> u32 {
     (0x330698ecu64.wrapping_mul(((v & 0xff_ffff) ^ 0x2722_0a95) as u64) >> 16) as u32
 }
 fn compute_hash(v: u64) -> u32 {
-    // let mut hasher = fnv::FnvHasher::default();
-    // std::hash::Hasher::write_u64(&mut hasher, v);
-    // std::hash::Hasher::finish(&hasher) as u32
+    let mut hasher = fnv::FnvHasher::default();
+    std::hash::Hasher::write_u64(&mut hasher, v);
+    std::hash::Hasher::finish(&hasher) as u32
 
-    (11400714785074694791u64.wrapping_mul(v) >> 40) as u32
+    // (11400714785074694791u64.wrapping_mul(v) >> 40) as u32
 }
 
 enum Symbol {
@@ -441,10 +441,10 @@ impl<W: Write> Compressor<W> {
             0 => CompressorInner::Stored,
             1 => CompressorInner::Fast(FastCompressor::new(4)),
             2 => CompressorInner::Fast(FastCompressor::new(9)),
-            3 => CompressorInner::Medium(MediumCompressor::new(16, 8, 6, 4, 6)),
-            4 => CompressorInner::Medium(MediumCompressor::new(32, 8, 12, 4, 9)),
-            5 => CompressorInner::Medium(MediumCompressor::new(64, 12, 16, 4, 9)),
-            6 => CompressorInner::Medium(MediumCompressor::new(128, 16, 16, 4, 12)),
+            3 => CompressorInner::Medium(MediumCompressor::new(64, 16, 6)),
+            4 => CompressorInner::Medium(MediumCompressor::new(32, 8, 9)),
+            5 => CompressorInner::Medium(MediumCompressor::new(64, 12, 9)),
+            6 => CompressorInner::Medium(MediumCompressor::new(128, 16, 12)),
             7.. => CompressorInner::Slow(SlowCompressor::new()),
         };
 

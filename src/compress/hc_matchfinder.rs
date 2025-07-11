@@ -35,8 +35,8 @@ pub(crate) struct HashChainMatchFinder {
 
     search_depth: u16,
 
-    /// If we already have a match of this length, limit lazy search to a smaller search depth.
-    good_length: u16,
+    // /// If we already have a match of this length, limit lazy search to a smaller search depth.
+    // good_length: u16,
 
     /// Stop searching for matches if the length is at least this long.
     nice_length: u16,
@@ -54,7 +54,7 @@ impl HashChainMatchFinder {
             hash_table: vec![0; CACHE_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
             search_depth,
-            good_length: 8,
+            // good_length: 8,
             nice_length,
             hash_mask: if min_match == 8 {
                 u64::MAX
@@ -79,9 +79,9 @@ impl HashChainMatchFinder {
         let mut best_ip = 0;
 
         let mut n = self.search_depth;
-        if min_match >= self.good_length {
-            n >>= 2;
-        }
+        // if min_match >= self.good_length {
+        //     n >>= 2;
+        // }
 
         let hash = compute_hash(value & self.hash_mask);
         let hash_index = (hash as usize) % CACHE_SIZE;
