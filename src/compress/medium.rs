@@ -20,7 +20,7 @@ impl MediumCompressor {
         let mut last_match = 0; //ip;
 
         while ip < data.len() {
-            let mut length = 0;
+            let mut length = 0u16;
             let mut distance = 0;
             let mut match_start = 0;
 
@@ -28,47 +28,41 @@ impl MediumCompressor {
             while symbols.len() < 16384 && ip + 8 <= data.len() {
                 if length == 0 {
                     let current = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
-                    if current & 0xFF_FFFF_FFFF == 0 {
-                        while ip > last_match && data[ip - 1] == 0 {
-                            ip -= 1;
-                        }
+                    // if current & 0xFF_FFFF_FFFF == 0 {
+                    //     length = 4;
+                    //     match_start = ip + 1;
+                    //     distance = 1;
 
-                        if ip == 0 || data[ip - 1] != 0 {
-                            ip += 1;
-                        }
+                    //     let min_start = 1.max(last_match).max(match_start.saturating_sub(258 - 4));
 
-                        symbols.push(Symbol::LiteralRun {
-                            start: last_match as u32,
-                            end: ip as u32,
-                        });
+                    //     while match_start > min_start && data[match_start - 2] == 0 {
+                    //         match_start -= 1;
+                    //         length += 1;
+                    //     }
+                    //     while length < 258
+                    //         && match_start + (length as usize) < data.len()
+                    //         && data[match_start + length as usize] == 0
+                    //     {
+                    //         length += 1;
+                    //     }
 
-                        let mut run_length = 0;
-                        while ip < data.len() && data[ip] == 0 && run_length < 258 {
-                            run_length += 1;
-                            ip += 1;
-                        }
-
-                        symbols.push(Symbol::Backref {
-                            length: run_length as u16,
-                            distance: 1,
-                            dist_sym: 0,
-                        });
-
-                        last_match = ip;
-
-                        length = 0;
-                        continue;
-                    }
-
-                    (length, distance, match_start) = self
-                        .match_finder
-                        .get_and_insert(&data, last_match, ip, current, 3);
-                    ip += 1;
+                    //     // Skip inserting all the totally zero values into the hash table.
+                    //     ip = match_start + length as usize - 3;
+                    // } else {
+                        (length, distance, match_start) = self.match_finder.get_and_insert(
+                            &data,
+                            last_match,
+                            ip,
+                            current as u32,
+                            3,
+                        );
+                        ip += 1;
+                    // }
                 }
 
-                // If we haven't found a match in a while, start skipping ahead by emitting multiple
-                // literals at once.
                 if length < 3 {
+                    // If we haven't found a match in a while, start skipping ahead by emitting
+                    // multiple literals at once.
                     ip += (ip - last_match) >> self.skip_ahead_shift;
                     continue;
                 }
@@ -78,34 +72,81 @@ impl MediumCompressor {
                 let (mut next_length, mut next_distance, mut next_match_start) = (0, 0, 0);
 
                 let match_end = match_start + length as usize;
-                if match_end > ip {
-                    // Insert match finder entries for the current match.
-                    let insert_end = (match_end - 2).min(data.len() - 8);
-                    let insert_start = ip.max(insert_end.saturating_sub(16));
-                    for j in (insert_start..insert_end).step_by(3) {
-                        let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                        self.match_finder.insert(v, j);
-                        self.match_finder.insert(v >> 8, j + 1);
-                        self.match_finder.insert(v >> 16, j + 2);
+                if match_end >= ip {
+                    // // Insert match finder entries for the current match.
+                    // let insert_end = (match_end - 3).min(data.len() - 8);
+                    // let insert_start = ip.max(insert_end.saturating_sub(16));
+                    // for j in (insert_start..insert_end).step_by(4) {
+                    //     let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                    //     self.match_finder.insert(v, j);
+                    //     self.match_finder.insert(v >> 8, j + 1);
+                    //     self.match_finder.insert(v >> 16, j + 2);
+                    //     self.match_finder.insert(v >> 24, j + 3);
+                    // }
+                    for j in ip..match_end.min(data.len() - 8) {
+                        let v = u32::from_le_bytes(data[j..][..4].try_into().unwrap());
+                        self.match_finder.insert(v as u64, j);
                     }
+
                     ip = match_end;
+
+                    // innumerable::event!("current-delta", ip as i32 - match_start as i32);
 
                     // Do a lookup at the position following the match. We'll need this even if we
                     // accept the match, so it doesn't cost anything.
                     if ip + 8 <= data.len() {
                         let next = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
-                        (next_length, next_distance, next_match_start) = self
-                            .match_finder
-                            .get_and_insert(&data, last_match, ip, next, 3);
-                        ip += 1;
+                        // if next & 0xFF_FFFF_FFFF == 0 {
+                        //     next_length = 4;
+                        //     next_match_start = ip + 1;
+                        //     next_distance = 1;
+
+                        //     let min_start =
+                        //         1.max(last_match).max(next_match_start.saturating_sub(258 - 4));
+
+                        //     while next_match_start > min_start && data[next_match_start - 2] == 0 {
+                        //         next_match_start -= 1;
+                        //         next_length += 1;
+                        //     }
+                        //     while next_length < 258
+                        //         && next_match_start + (next_length as usize) < data.len()
+                        //         && data[next_match_start + next_length as usize] == 0
+                        //     {
+                        //         next_length += 1;
+                        //     }
+
+                        //     // Skip inserting all the totally zero values into the hash table.
+                        //     ip = next_match_start + next_length as usize - 3;
+                        // } else {
+                            (next_length, next_distance, next_match_start) = self
+                                .match_finder
+                                .get_and_insert(&data, last_match, ip, next as u32, 3);
+
+                            // innumerable::event!("x-delta", next_match_start as i32 - ip as i32);
+
+                            ip += 1;
+                        // }
                     }
                 }
+
+                // if next_length >= 3 {
+                //     // innumerable::event!("next-length", next_length);
+                //     innumerable::event!("next-delta", next_match_start as i32 - match_start as i32);
+                // }
 
                 // Insert the current match, unless the next match starts too close to the current
                 // one. Because we expand matches backwards, the next match might almost completely
                 // overlap. If so, it'll probably be cheaper to emit an extra literal rather than an
                 // extra backref.
                 if next_length < 3 || next_match_start > match_start + 1 {
+                    // if next_length < 3 && next_match_start > match_start + 1 {
+                    //     innumerable::event!("match", 0);
+                    // } else if next_length < 3 {
+                    //     innumerable::event!("match", 1);
+                    // } else {
+                    //     innumerable::event!("match", 2);
+                    // }
+
                     assert!(last_match <= match_start);
                     symbols.push(Symbol::LiteralRun {
                         start: last_match as u32,
@@ -128,6 +169,9 @@ impl MediumCompressor {
                             next_length = 0;
                         }
                     }
+                    //     innumerable::event!("fizzle", 0);
+                    // } else if next_length >= 3 {
+                    //     innumerable::event!("fizzle", 1);
                 }
 
                 // Advance to the next match (which might have a length of zero)
