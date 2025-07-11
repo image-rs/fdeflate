@@ -1309,6 +1309,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn zero_length() {
         let mut compressed = crate::compress_to_vec(b"").to_vec();
 

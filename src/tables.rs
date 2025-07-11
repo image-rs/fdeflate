@@ -19,6 +19,7 @@ pub(crate) const HUFFMAN_LENGTHS: [u8; 286] = [
     12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 9,
 ];
 
+#[allow(unused)]
 pub(crate) const HUFFMAN_CODES: [u16; 286] = match crate::compute_codes(&HUFFMAN_LENGTHS) {
     Some(codes) => codes,
     None => panic!("HUFFMAN_LENGTHS is invalid"),
