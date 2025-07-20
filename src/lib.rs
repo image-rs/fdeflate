@@ -26,7 +26,7 @@ mod decompress;
 mod huffman;
 mod tables;
 
-pub use compress::{compress_to_vec, Compressor, StoredOnlyCompressor};
+pub use compress::{compress_to_vec, Compressor, UltraFastCompressor};
 pub use decompress::{
     decompress_to_vec, decompress_to_vec_bounded, BoundedDecompressionError, DecompressionError,
     Decompressor,

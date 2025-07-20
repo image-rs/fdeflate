@@ -1,18 +1,18 @@
 use simd_adler32::Adler32;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 
 use crate::tables::{
     BITMASKS, HUFFMAN_CODES, HUFFMAN_LENGTHS, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
 };
 
 /// Compressor that produces fdeflate compressed streams.
-pub struct Compressor<W: Write> {
+pub struct UltraFastCompressor<W: Write> {
     checksum: Adler32,
     buffer: u64,
     nbits: u8,
     writer: W,
 }
-impl<W: Write> Compressor<W> {
+impl<W: Write> UltraFastCompressor<W> {
     fn write_bits(&mut self, bits: u64, nbits: u8) -> io::Result<()> {
         debug_assert!(nbits <= 64);
 
@@ -181,99 +181,20 @@ impl<W: Write> Compressor<W> {
     }
 }
 
-/// Compressor that only writes the stored blocks.
-///
-/// This is useful for writing files that are not compressed, but still need to be wrapped in a
-/// zlib stream.
-pub struct StoredOnlyCompressor<W> {
-    writer: W,
-    checksum: Adler32,
-    block_bytes: u16,
-}
-impl<W: Write + Seek> StoredOnlyCompressor<W> {
-    /// Creates a new `StoredOnlyCompressor` that writes to the given writer.
-    pub fn new(mut writer: W) -> io::Result<Self> {
-        writer.write_all(&[0x78, 0x01])?; // zlib header
-        writer.write_all(&[0; 5])?; // placeholder stored block header
-
-        Ok(Self {
-            writer,
-            checksum: Adler32::new(),
-            block_bytes: 0,
-        })
-    }
-
-    fn set_block_header(&mut self, size: u16, last: bool) -> io::Result<()> {
-        self.writer.seek(SeekFrom::Current(-(size as i64 + 5)))?;
-        self.writer.write_all(&[
-            last as u8,
-            (size & 0xFF) as u8,
-            ((size >> 8) & 0xFF) as u8,
-            (!size & 0xFF) as u8,
-            ((!size >> 8) & 0xFF) as u8,
-        ])?;
-        self.writer.seek(SeekFrom::Current(size as i64))?;
-
-        Ok(())
-    }
-
-    /// Writes the given data to the underlying writer.
-    pub fn write_data(&mut self, mut data: &[u8]) -> io::Result<()> {
-        self.checksum.write(data);
-        while !data.is_empty() {
-            if self.block_bytes == u16::MAX {
-                self.set_block_header(u16::MAX, false)?;
-                self.writer.write_all(&[0; 5])?; // placeholder stored block header
-                self.block_bytes = 0;
-            }
-
-            let prefix_bytes = data.len().min((u16::MAX - self.block_bytes) as usize);
-            self.writer.write_all(&data[..prefix_bytes])?;
-            self.block_bytes += prefix_bytes as u16;
-            data = &data[prefix_bytes..];
-        }
-
-        Ok(())
-    }
-
-    /// Finish writing the final block and return the underlying writer.
-    pub fn finish(mut self) -> io::Result<W> {
-        self.set_block_header(self.block_bytes, true)?;
-
-        // Write Adler32 checksum
-        let checksum: u32 = self.checksum.finish();
-        self.writer
-            .write_all(checksum.to_be_bytes().as_ref())
-            .unwrap();
-
-        Ok(self.writer)
-    }
-}
-impl<W> StoredOnlyCompressor<W> {
-    /// Return the number of bytes that will be written to the output stream
-    /// for the given input size. Because this compressor only writes stored blocks,
-    /// the output size is always slightly *larger* than the input size.
-    pub fn compressed_size(raw_size: usize) -> usize {
-        (raw_size.saturating_sub(1) / u16::MAX as usize) * (u16::MAX as usize + 5)
-            + (raw_size % u16::MAX as usize + 5)
-            + 6
-    }
-}
-
-/// Compresses the given data.
-pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
-    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
-    compressor.write_data(input).unwrap();
-    compressor.finish().unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::Rng;
 
+    fn compress_to_vec_ultrafast(input: &[u8]) -> Vec<u8> {
+        let mut compressor = UltraFastCompressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
+        compressor.write_data(input).unwrap();
+        compressor.finish().unwrap()
+    }
+
+
     fn roundtrip(data: &[u8]) {
-        let compressed = compress_to_vec(data);
+        let compressed = compress_to_vec_ultrafast(data);
         let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).unwrap();
         assert_eq!(&decompressed, data);
     }
