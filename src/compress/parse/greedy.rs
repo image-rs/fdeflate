@@ -164,15 +164,18 @@ impl<M: MatchFinder> GreedyCompressor<M> {
                 last_match = ip;
             }
 
+            // The skip ahead logic can overshoot the end of the data.
+            ip = ip.min(data.len());
+
             if self.symbols.len() >= 16384 || (flush != Flush::None && !self.symbols.is_empty()) {
                 let last_block = flush == Flush::Finish && ip == data.len();
                 deflate::write_block(writer, data, base_index, &self.symbols, last_block)?;
                 self.symbols.clear();
                 last_block_end = ip;
+            }
 
-                if ip == data.len() {
-                    break;
-                }
+            if ip == data.len() {
+                break;
             }
         }
 
