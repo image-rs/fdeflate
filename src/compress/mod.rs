@@ -240,6 +240,7 @@ pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
     compressor.finish().unwrap()
 }
 
+/// Compresses the given data with a specific compression level.
 pub fn compress_to_vec_with_level(input: &[u8], level: u8) -> Vec<u8> {
     let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4), level, true).unwrap();
     compressor.write_data(input).unwrap();
