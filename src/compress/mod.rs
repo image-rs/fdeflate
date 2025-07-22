@@ -6,9 +6,10 @@ use std::io::{self, Write};
 use simd_adler32::Adler32;
 pub use ultrafast::UltraFastCompressor;
 
-use crate::compress::bitwriter::BitWriter;
+use bitwriter::BitWriter;
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
+const WINDOW_SIZE: usize = 32768;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -20,14 +21,14 @@ enum Flush {
 
 struct InputStream {
     data: Vec<u8>,
-    base_index: u64,
+    base_index: u32,
     written: usize,
 }
 impl InputStream {
     fn discard_bytes(&mut self, n: usize) {
         self.data.copy_within(n.., 0);
         self.data.truncate(self.data.len() - n);
-        self.base_index += n as u64;
+        self.base_index += n as u32;
         self.written -= n;
     }
 }
@@ -55,8 +56,6 @@ impl<W: Write> Compressor<W> {
     /// of compression.
     ///
     /// `zlib` indicates whether to write a zlib header and checksum.
-    ///
-    /// TODO: Higher compression levels aren't implemented and fallback to lower ones.
     pub fn new(mut writer: W, level: u8, zlib: bool) -> io::Result<Self> {
         if zlib {
             writer.write_all(&[0x78, 0x01])?; // zlib header
@@ -73,7 +72,7 @@ impl<W: Write> Compressor<W> {
                 base_index: 0,
                 written: 0,
             },
-            window_size: if level == 0 { 0 } else { 32768 },
+            window_size: if level == 0 { 0 } else { WINDOW_SIZE },
             checksum: zlib.then(Adler32::new),
         })
     }
@@ -86,12 +85,18 @@ impl<W: Write> Compressor<W> {
 
         // If we have no buffered input, attempt to compress directly from the input buffer.
         if self.input.data.is_empty() {
-            let written = self
-                .inner
-                .compress(&mut self.writer, data, 0, 0, Flush::None)?;
+            let written = self.inner.compress(
+                &mut self.writer,
+                data,
+                self.input.base_index,
+                0,
+                Flush::None,
+            )?;
 
             let start = written.saturating_sub(self.window_size);
             self.input.data.extend_from_slice(&data[start..]);
+            self.input.base_index += start as u32;
+            self.input.written = written - start;
             return Ok(());
         }
 
@@ -126,7 +131,7 @@ impl<W: Write> Compressor<W> {
         )?;
 
         self.input.data.clear();
-        self.input.base_index += (self.input.written + written) as u64;
+        self.input.base_index += (self.input.written + written) as u32;
         self.input.written = 0;
 
         let writer = self.writer.flush()?;
@@ -147,20 +152,20 @@ impl CompressorInner {
         &mut self,
         writer: &mut BitWriter<W>,
         input: &[u8],
-        _base_index: u64,
+        _base_index: u32,
         start: usize,
         flush: Flush,
     ) -> std::io::Result<usize> {
-        if flush == Flush::Finish && input.is_empty() {
+        if flush == Flush::Finish && input.len() == start {
             writer.write_bits(3, 10)?;
             writer.flush()?;
             return Ok(0);
         }
 
-        let mut written = 0;
-        match self {
+        let written = match self {
             CompressorInner::Uncompressed => {
                 let mut input = &input[start..];
+                let mut written = 0;
 
                 while input.len() > STORED_BLOCK_MAX_SIZE {
                     writer.write_bits(0, 3)?;
@@ -184,8 +189,9 @@ impl CompressorInner {
                     writer.write_all(input)?;
                     written += input.len();
                 }
+                written
             }
-        }
+        };
 
         if flush == Flush::Sync {
             writer.write_bits(0, 3)?;
@@ -198,7 +204,12 @@ impl CompressorInner {
 
 /// Compresses the given data.
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
-    let mut compressor = UltraFastCompressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
+    compress_to_vec_with_level(input, 1)
+}
+
+/// Compresses the given data with a specific compression level.
+pub fn compress_to_vec_with_level(input: &[u8], level: u8) -> Vec<u8> {
+    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4), level, true).unwrap();
     compressor.write_data(input).unwrap();
     compressor.finish().unwrap()
 }
