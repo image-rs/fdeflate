@@ -192,7 +192,6 @@ mod tests {
         compressor.finish().unwrap()
     }
 
-
     fn roundtrip(data: &[u8]) {
         let compressed = compress_to_vec_ultrafast(data);
         let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).unwrap();
