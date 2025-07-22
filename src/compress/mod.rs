@@ -72,7 +72,7 @@ impl<W: Write> Compressor<W> {
             inner: match level {
                 0 => CompressorInner::Uncompressed,
                 1 => CompressorInner::Fast(GreedyCompressor::new(5, HashTableMatchFinder::new())),
-                2.. => CompressorInner::Fast(GreedyCompressor::new(6, HashTableMatchFinder::new())),
+                2.. => CompressorInner::Fast(GreedyCompressor::new(9, HashTableMatchFinder::new())),
             },
             writer: BitWriter::new(writer),
             input: InputStream {
