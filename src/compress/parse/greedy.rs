@@ -11,6 +11,7 @@ pub(crate) struct GreedyCompressor<M> {
     skip_ahead_shift: u8,
 
     symbols: Vec<Symbol>,
+
     /// Bytes that have been encoded into symbols but not yet written to the output.
     pending_bytes: usize,
 }
@@ -95,16 +96,7 @@ impl<M: MatchFinder> GreedyCompressor<M> {
                 let mut m2 = Match::empty();
 
                 if m.end() >= ip {
-                    // // Insert match finder entries for the current match.
-                    // let insert_end = (match_end - 3).min(data.len() - 8);
-                    // let insert_start = ip.max(insert_end.saturating_sub(16));
-                    // for j in (insert_start..insert_end).step_by(4) {
-                    //     let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                    //     self.match_finder.insert(v, j);
-                    //     self.match_finder.insert(v >> 8, j + 1);
-                    //     self.match_finder.insert(v >> 16, j + 2);
-                    //     self.match_finder.insert(v >> 24, j + 3);
-                    // }
+                    // Insert match finder entries for the current match.
                     for j in ip..m.end().min(data.len() - 8) {
                         let v = u32::from_le_bytes(data[j..][..4].try_into().unwrap());
                         self.match_finder.insert(v as u64, base_index + j as u32);
@@ -128,11 +120,6 @@ impl<M: MatchFinder> GreedyCompressor<M> {
                         }
                     }
                 }
-
-                // if next_length >= 3 {
-                //     // innumerable::event!("next-length", next_length);
-                //     innumerable::event!("next-delta", next_match_start as i32 - match_start as i32);
-                // }
 
                 // Insert the current match, unless the next match starts too close to the current
                 // one. Because we expand matches backwards, the next match might almost completely
