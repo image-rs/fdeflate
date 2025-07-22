@@ -184,7 +184,7 @@ impl CompressorInner {
         start: usize,
         flush: Flush,
     ) -> std::io::Result<usize> {
-        if flush == Flush::Finish && input.is_empty() {
+        if flush == Flush::Finish && input.len() == start {
             writer.write_bits(3, 10)?;
             writer.flush()?;
             return Ok(0);
