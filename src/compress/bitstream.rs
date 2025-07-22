@@ -51,8 +51,6 @@ pub(crate) fn write_block<W: Write>(
     for symbol in symbols {
         match symbol {
             Symbol::LiteralRun { start, end } => {
-                assert!(end > start, "end: {end}, start: {start}");
-                assert!(*start >= base_index, "start: {start}, base_index: {base_index}");
                 for lit in &data[(*start - base_index) as usize..(*end - base_index) as usize] {
                     frequencies[*lit as usize] += 1;
                 }
@@ -75,15 +73,15 @@ pub(crate) fn write_block<W: Write>(
     let mut dist_codes = [0u16; 30];
     build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
 
-    let num_litlen_codes = 286;
-    // while num_litlen_codes > 257 && lengths[num_litlen_codes - 1] == 0 {
-    //     num_litlen_codes -= 1;
-    // }
+    let mut num_litlen_codes = 286;
+    while num_litlen_codes > 257 && lengths[num_litlen_codes - 1] == 0 {
+        num_litlen_codes -= 1;
+    }
 
-    let num_dist_codes = 30;
-    // while num_dist_codes > 1 && dist_lengths[num_dist_codes - 1] == 0 {
-    //     num_dist_codes -= 1;
-    // }
+    let mut num_dist_codes = 30;
+    while num_dist_codes > 1 && dist_lengths[num_dist_codes - 1] == 0 {
+        num_dist_codes -= 1;
+    }
 
     let mut code_length_frequencies = [0u32; 19];
     for &length in &lengths[..num_litlen_codes] {

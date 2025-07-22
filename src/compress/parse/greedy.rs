@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use crate::compress::{
-    deflate::{self, Symbol},
+    bitstream::{self, Symbol},
     matchfinder::{Match, MatchFinder},
     BitWriter, Flush,
 };
@@ -136,7 +136,7 @@ impl<M: MatchFinder> GreedyCompressor<M> {
                     self.symbols.push(Symbol::Backref {
                         length: m.length as u16,
                         distance: m.distance,
-                        dist_sym: deflate::distance_to_dist_sym(m.distance),
+                        dist_sym: bitstream::distance_to_dist_sym(m.distance),
                     });
                     last_match = m.end();
 
@@ -169,7 +169,7 @@ impl<M: MatchFinder> GreedyCompressor<M> {
 
             if self.symbols.len() >= 16384 || (flush != Flush::None && !self.symbols.is_empty()) {
                 let last_block = flush == Flush::Finish && ip == data.len();
-                deflate::write_block(writer, data, base_index, &self.symbols, last_block)?;
+                bitstream::write_block(writer, data, base_index, &self.symbols, last_block)?;
                 self.symbols.clear();
                 last_block_end = ip;
             }

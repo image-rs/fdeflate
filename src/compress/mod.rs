@@ -1,5 +1,5 @@
 mod bitwriter;
-mod deflate;
+mod bitstream;
 
 mod matchfinder;
 mod parse;
