@@ -51,29 +51,44 @@ pub(crate) trait MatchFinder {
     fn reset_indices(&mut self, old_base_index: u32);
 }
 
-fn compute_hash3(v: u32) -> u32 {
-    (0x330698ecu64.wrapping_mul(((v & 0xff_ffff) ^ 0x2722_0a95) as u64) >> 16) as u32
-}
-
 fn compute_hash(v: u64) -> u32 {
-    // let mut hasher = fnv::FnvHasher::default();
-    // std::hash::Hasher::write_u64(&mut hasher, v);
-    // std::hash::Hasher::finish(&hasher) as u32
-
     (11400714785074694791u64.wrapping_mul(v) >> 40) as u32
 }
 
-fn compute_hash32(v: u32) -> u32 {
-    // let mut hasher = fnv::FnvHasher::default();
-    // std::hash::Hasher::write_u32(&mut hasher, v);
-    // std::hash::Hasher::finish(&hasher) as u32
+/// Find a 4+ byte length of the match between the current position and the previous position,
+/// searching both forwards and backwards.
+fn match_length4(
+    value: u32,
+    data: &[u8],
+    anchor: usize,
+    mut ip: usize,
+    mut prev_index: usize,
+) -> (u16, usize) {
+    assert!(
+        prev_index < ip,
+        "Match past current position: {prev_index} {ip}"
+    );
 
-    (11400714785074694791u64.wrapping_mul(v as u64) >> 40) as u32
+    if value != u32::from_ne_bytes(data[prev_index..][..4].try_into().unwrap()) {
+        return (0, ip);
+    }
+
+    let mut length = 4;
+    while length < 258 && ip > anchor && prev_index > 0 && data[ip - 1] == data[prev_index - 1] {
+        length += 1;
+        ip -= 1;
+        prev_index -= 1;
+    }
+    while length < 258 && ip + length < data.len() && data[ip + length] == data[prev_index + length]
+    {
+        length += 1;
+    }
+    (length as u16, ip)
 }
 
-/// Find the length of the match between the current position and the previous position, searching
-/// both forwards and backwards from the starting position.
-fn match_length(
+/// Find a 8+ byte length of the match between the current position and the previous position,
+/// searching both forwards and backwards.
+fn match_length8(
     value: u64,
     data: &[u8],
     anchor: usize,

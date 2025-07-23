@@ -13,7 +13,7 @@ pub use ultrafast::UltraFastCompressor;
 use bitwriter::BitWriter;
 use parse::GreedyCompressor;
 
-use crate::compress::matchfinder::HashTableMatchFinder;
+use crate::compress::matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
 const WINDOW_SIZE: usize = 32768;
@@ -72,7 +72,11 @@ impl<W: Write> Compressor<W> {
             inner: match level {
                 0 => CompressorInner::Uncompressed,
                 1 => CompressorInner::Fast(GreedyCompressor::new(5, HashTableMatchFinder::new())),
-                2.. => CompressorInner::Fast(GreedyCompressor::new(9, HashTableMatchFinder::new())),
+                2 => CompressorInner::Fast(GreedyCompressor::new(9, HashTableMatchFinder::new())),
+                3 => CompressorInner::Medium(GreedyCompressor::new(6, HashChainMatchFinder::new(6, 16))),
+                4 => CompressorInner::Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(24, 24))),
+                5 => CompressorInner::Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(32, 32))),
+                6.. => CompressorInner::Medium(GreedyCompressor::new(12, HashChainMatchFinder::new(128, 128))),
             },
             writer: BitWriter::new(writer),
             input: InputStream {
@@ -123,6 +127,7 @@ impl<W: Write> Compressor<W> {
             match &mut self.inner {
                 CompressorInner::Uncompressed => {}
                 CompressorInner::Fast(fast) => fast.reset_indices(self.input.base_index),
+                CompressorInner::Medium(medium) => medium.reset_indices(self.input.base_index),
             }
             self.input.base_index = 0;
         }
@@ -174,6 +179,7 @@ impl<W: Write> Compressor<W> {
 enum CompressorInner {
     Uncompressed,
     Fast(GreedyCompressor<HashTableMatchFinder>),
+    Medium(GreedyCompressor<HashChainMatchFinder>),
 }
 impl CompressorInner {
     fn compress<W: Write>(
@@ -221,6 +227,9 @@ impl CompressorInner {
             }
             CompressorInner::Fast(fast) => {
                 fast.compress(writer, input, base_index, start, flush)?
+            }
+            CompressorInner::Medium(medium) => {
+                medium.compress(writer, input, base_index, start, flush)?
             }
         };
 

@@ -1,37 +1,11 @@
-use crate::compress::WINDOW_SIZE;
+use crate::compress::{
+    matchfinder::{Match, MatchFinder},
+    WINDOW_SIZE,
+};
 
-const CACHE_SIZE: usize = 65536;// 1 << 18;
+const CACHE_SIZE: usize = 65536; // 1 << 18;
 
-/// Find the length of the match between the current position and the previous position, searching
-/// both forwards and backwards from the starting position.
-fn match_length(
-    data: &[u8],
-    anchor: usize,
-    mut ip: usize,
-    mut prev_index: usize,
-    value: u32,
-) -> (u16, usize) {
-    assert!(
-        prev_index < ip,
-        "Match past current position: {prev_index} {ip}"
-    );
-
-    if value != u32::from_ne_bytes(data[prev_index..][..4].try_into().unwrap()) {
-        return (0, ip);
-    }
-
-    let mut length = 4;
-    while length < 258 && ip > anchor && prev_index > 0 && data[ip - 1] == data[prev_index - 1] {
-        length += 1;
-        ip -= 1;
-        prev_index -= 1;
-    }
-    while length < 258 && ip + length < data.len() && data[ip + length] == data[prev_index + length]
-    {
-        length += 1;
-    }
-    (length as u16, ip)
-}
+const MIN_MATCH: u16 = 4;
 
 pub(crate) struct HashChainMatchFinder {
     hash_table: Box<[u32; CACHE_SIZE]>,
@@ -43,53 +17,46 @@ pub(crate) struct HashChainMatchFinder {
     // good_length: u16,
     /// Stop searching for matches if the length is at least this long.
     nice_length: u16,
-    // /// Mask of low-bytes to consider for hashing.
-    // hash_mask: u64,
 }
 impl HashChainMatchFinder {
-    pub(crate) fn new(search_depth: u16, nice_length: u16, min_match: u8) -> Self {
-        assert!((3..=8).contains(&min_match));
-
+    pub(crate) fn new(search_depth: u16, nice_length: u16) -> Self {
         Self {
             hash_table: vec![0; CACHE_SIZE].into_boxed_slice().try_into().unwrap(),
             links: vec![0; WINDOW_SIZE].into_boxed_slice().try_into().unwrap(),
             search_depth,
             // good_length: 8,
             nice_length,
-            // hash_mask: if min_match == 8 {
-            //     u64::MAX
-            // } else {
-            //     (1 << (min_match.max(4) * 8)) - 1
-            // },
         }
     }
+}
 
-    pub(crate) fn get_and_insert(
+impl MatchFinder for HashChainMatchFinder {
+    fn get_and_insert(
         &mut self,
         data: &[u8],
+        base_index: u32,
         anchor: usize,
         ip: usize,
-        value: u32,
-        min_match: u16,
-    ) -> (u16, u16, usize) {
-        let min_offset = ip.saturating_sub(32768).max(1);
+        value: u64,
+    ) -> Match {
+        let min_offset = (base_index + (ip as u32).saturating_sub(32768)).max(1);
 
         let mut best_offset = 0;
-        let mut best_length = min_match - 1;
-        let mut best_ip = 0;
+        let mut best_length = MIN_MATCH - 1;
+        let mut best_start = 0;
 
         let mut n = self.search_depth;
         // if min_match >= self.good_length {
         //     n >>= 2;
         // }
 
-        let hash = super::compute_hash32(value);
+        let hash = super::compute_hash(value & 0xFFFF_FFFF);
         let hash_index = (hash as usize) % CACHE_SIZE;
-        let mut offset = self.hash_table[hash_index] as usize;
+        let mut offset = self.hash_table[hash_index];
 
         // Insert current value
         self.hash_table[hash_index] = ip as u32;
-        self.links[ip % WINDOW_SIZE] = offset as u32;
+        self.links[ip % WINDOW_SIZE] = offset;
 
         // Visit previous matches
         loop {
@@ -97,13 +64,17 @@ impl HashChainMatchFinder {
                 break;
             }
 
-            let (length, start) = match_length(data, anchor, ip, offset, value);
+            let (length, start) = super::match_length4(
+                value as u32,
+                data,
+                anchor,
+                ip,
+                (offset - base_index) as usize,
+            );
             if length > best_length {
                 best_length = length;
-                best_offset = offset as u32;
-                best_ip = start;
-                // } else if best_length > min_match {
-                //     break;
+                best_offset = offset;
+                best_start = start;
             }
             if length >= self.nice_length || ip + length as usize == data.len() {
                 break;
@@ -114,24 +85,34 @@ impl HashChainMatchFinder {
                 break;
             }
 
-            offset = self.links[offset % WINDOW_SIZE] as usize;
+            offset = self.links[offset as usize % WINDOW_SIZE];
         }
 
-        if best_length >= min_match {
-            return (
-                best_length as u16,
-                (ip - best_offset as usize) as u16,
-                best_ip,
-            );
+        if best_length >= MIN_MATCH {
+            return Match {
+                length: best_length,
+                distance: (ip - best_offset as usize) as u16,
+                start: best_start,
+            };
         }
 
-        (0, 0, ip)
+        Match::empty()
     }
 
-    pub(crate) fn insert(&mut self, value: u64, offset: usize) {
-        let hash = super::compute_hash32(value as u32);
+    fn insert(&mut self, value: u64, offset: u32) {
+        let hash = super::compute_hash(value & 0xFFFF_FFFF);
         let prev_offset = self.hash_table[(hash as usize) % CACHE_SIZE];
         self.hash_table[(hash as usize) % CACHE_SIZE] = offset as u32;
         self.links[offset as usize % WINDOW_SIZE] = prev_offset;
+    }
+
+    fn reset_indices(&mut self, old_base_index: u32) {
+        for v in &mut *self.hash_table {
+            *v = v.saturating_sub(old_base_index);
+        }
+
+        for v in &mut *self.links {
+            *v = v.saturating_sub(old_base_index);
+        }
     }
 }

@@ -34,7 +34,7 @@ impl MatchFinder for HashTableMatchFinder {
         if offset >= min_offset {
             assert!(ip > (offset - base_index) as usize, "ip={ip} offset={offset} base_index={base_index}");
             let (length, start) =
-                super::match_length(value, data, anchor, ip, (offset - base_index) as usize);
+                super::match_length8(value, data, anchor, ip, (offset - base_index) as usize);
             if length >= 4 {
                 return Match::new(length as u16, (ip - offset as usize) as u16, start);
             }
