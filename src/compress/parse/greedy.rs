@@ -6,7 +6,7 @@ use crate::compress::{
     BitWriter, Flush,
 };
 
-pub(crate) struct GreedyCompressor<M> {
+pub(crate) struct GreedyParser<M> {
     match_finder: M,
     skip_ahead_shift: u8,
 
@@ -16,7 +16,7 @@ pub(crate) struct GreedyCompressor<M> {
     pending_bytes: usize,
 }
 
-impl<M: MatchFinder> GreedyCompressor<M> {
+impl<M: MatchFinder> GreedyParser<M> {
     pub fn new(skip_ahead_shift: u8, match_finder: M) -> Self {
         Self {
             match_finder,
@@ -113,9 +113,9 @@ impl<M: MatchFinder> GreedyCompressor<M> {
                             // Skip inserting all the totally zero values into the hash table.
                             ip = m2.end() - 3;
                         } else {
-                            m2 = self.match_finder.get_and_insert(
-                                &data, base_index, ip, ip, next,
-                            );
+                            m2 = self
+                                .match_finder
+                                .get_and_insert(&data, base_index, ip, ip, next);
 
                             while m2.length < 258
                                 && m2.start > last_match

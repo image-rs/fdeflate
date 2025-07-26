@@ -2,7 +2,6 @@ use crate::compress::matchfinder::{Match, MatchFinder};
 
 const CACHE_SIZE: usize = 1 << 16;
 
-
 pub(crate) struct HashTableMatchFinder {
     hash_table: Box<[u32; CACHE_SIZE]>,
 }
@@ -32,7 +31,10 @@ impl MatchFinder for HashTableMatchFinder {
         self.hash_table[hash_index] = ip as u32;
 
         if offset >= min_offset {
-            assert!(ip > (offset - base_index) as usize, "ip={ip} offset={offset} base_index={base_index}");
+            assert!(
+                ip > (offset - base_index) as usize,
+                "ip={ip} offset={offset} base_index={base_index}"
+            );
             let (length, start) =
                 super::match_length8(value, data, anchor, ip, (offset - base_index) as usize);
             if length >= 4 {

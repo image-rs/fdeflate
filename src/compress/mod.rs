@@ -11,7 +11,7 @@ use simd_adler32::Adler32;
 pub use ultrafast::UltraFastCompressor;
 
 use bitwriter::BitWriter;
-use parse::GreedyCompressor;
+use parse::GreedyParser;
 
 use crate::compress::matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
 
@@ -71,19 +71,13 @@ impl<W: Write> Compressor<W> {
         use CompressorInner::*;
         let inner = match level {
             0 => Uncompressed,
-            1 => Fast(GreedyCompressor::new(5, HashTableMatchFinder::new())),
-            2 => MediumFast(GreedyCompressor::new(6, HashChainMatchFinder::new(16, 64))),
-            3 => Medium(GreedyCompressor::new(6, HashChainMatchFinder::new(8, 16))),
-            4 => Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(16, 32))),
-            5 => Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(32, 64))),
-            6 => Medium(GreedyCompressor::new(
-                9,
-                HashChainMatchFinder::new(128, 128),
-            )),
-            7.. => Medium(GreedyCompressor::new(
-                9,
-                HashChainMatchFinder::new(256, 128),
-            )),
+            1 => Fast(GreedyParser::new(5, HashTableMatchFinder::new())),
+            2 => MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(16, 64))),
+            3 => Medium(GreedyParser::new(6, HashChainMatchFinder::new(8, 16))),
+            4 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(16, 32))),
+            5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(32, 64))),
+            6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(128, 128))),
+            7.. => Medium(GreedyParser::new(9, HashChainMatchFinder::new(256, 128))),
         };
 
         Ok(Self {
@@ -191,9 +185,9 @@ impl<W: Write> Compressor<W> {
 
 enum CompressorInner {
     Uncompressed,
-    Fast(GreedyCompressor<HashTableMatchFinder>),
-    MediumFast(GreedyCompressor<HashChainMatchFinder<8>>),
-    Medium(GreedyCompressor<HashChainMatchFinder>),
+    Fast(GreedyParser<HashTableMatchFinder>),
+    MediumFast(GreedyParser<HashChainMatchFinder<8>>),
+    Medium(GreedyParser<HashChainMatchFinder>),
 }
 impl CompressorInner {
     fn compress<W: Write>(
