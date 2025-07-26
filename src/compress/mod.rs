@@ -1,6 +1,5 @@
 mod bitstream;
 mod bitwriter;
-
 mod matchfinder;
 mod parse;
 mod ultrafast;
@@ -11,9 +10,8 @@ use simd_adler32::Adler32;
 pub use ultrafast::UltraFastCompressor;
 
 use bitwriter::BitWriter;
+use matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
 use parse::GreedyParser;
-
-use crate::compress::matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
 const WINDOW_SIZE: usize = 32768;
