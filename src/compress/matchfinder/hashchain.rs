@@ -63,17 +63,13 @@ impl<const MIN_MATCH: u16> MatchFinder for HashChainMatchFinder<MIN_MATCH> {
                 break;
             }
 
-            let (length, start) = if MIN_MATCH >= 8 {
-                super::match_length8(value, data, anchor, ip, (offset - base_index) as usize)
-            } else {
-                super::match_length4(
-                    value as u32,
-                    data,
-                    anchor,
-                    ip,
-                    (offset - base_index) as usize,
-                )
-            };
+            let (length, start) = super::match_length::<MIN_MATCH>(
+                value,
+                data,
+                anchor,
+                ip,
+                (offset - base_index) as usize,
+            );
             if length > best_length {
                 best_length = length;
                 best_offset = offset;
