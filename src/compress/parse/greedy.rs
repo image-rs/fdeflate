@@ -27,14 +27,16 @@ impl<M: MatchFinder> GreedyParser<M> {
     }
 
     fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
+        let value = data[ip];
+
         let mut m = Match::new(4, 1, ip + 1);
         let min_start = 1.max(last_match).max(m.end().saturating_sub(258));
 
-        while m.start > min_start && data[m.start - 2] == 0 {
+        while m.start > min_start && data[m.start - 2] == value {
             m.start -= 1;
             m.length += 1;
         }
-        while m.length < 258 && data.get(m.end()) == Some(&0) {
+        while m.length < 258 && data.get(m.end()) == Some(&value) {
             m.length += 1;
         }
 
@@ -73,7 +75,7 @@ impl<M: MatchFinder> GreedyParser<M> {
             while self.symbols.len() < 16384 && ip + 8 <= data.len() {
                 if m.is_empty() {
                     let current = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
-                    if current & 0xFF_FFFF_FFFF == 0 {
+                    if current as u32 == (current >> 8) as u32 {
                         m = Self::rle_match(data, last_match, ip);
                         ip = m.end() - 3; // Skip inserting all the totally zero values into the hash table.
                     } else {
@@ -108,7 +110,7 @@ impl<M: MatchFinder> GreedyParser<M> {
                     // accept the match, so it doesn't cost anything.
                     if ip + 8 <= data.len() {
                         let next = u64::from_le_bytes(data[ip..][..8].try_into().unwrap());
-                        if next & 0xFF_FFFF_FFFF == 0 {
+                        if next as u32 == (next >> 8) as u32 {
                             m2 = Self::rle_match(data, last_match, ip);
                             // Skip inserting all the totally zero values into the hash table.
                             ip = m2.end() - 3;
