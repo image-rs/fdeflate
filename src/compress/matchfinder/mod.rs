@@ -55,8 +55,10 @@ fn compute_hash(v: u64) -> u32 {
     (11400714785074694791u64.wrapping_mul(v) >> 40) as u32
 }
 
-/// Find a 4+ byte length of the match between the current position and the previous position,
-/// searching both forwards and backwards.
+/// Find the 4+ byte length of the match between the current position and the previous position.
+///
+/// This function checks that `value` matches the 4 bytes at the previous index, and if so, searches
+/// both forwards and backwards to find the starting position and total length of the match.
 fn match_length4(
     value: u32,
     data: &[u8],
@@ -86,8 +88,10 @@ fn match_length4(
     (length as u16, ip)
 }
 
-/// Find a 8+ byte length of the match between the current position and the previous position,
-/// searching both forwards and backwards.
+/// Find the 8+ byte length of the match between the current position and the previous position.
+///
+/// This function checks that `value` matches the 8 bytes at the previous index, and if so, searches
+/// both forwards and backwards to find the starting position and total length of the match.
 fn match_length8(
     value: u64,
     data: &[u8],
