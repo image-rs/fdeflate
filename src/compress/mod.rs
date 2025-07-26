@@ -1,5 +1,5 @@
-mod bitwriter;
 mod bitstream;
+mod bitwriter;
 
 mod matchfinder;
 mod parse;
@@ -68,16 +68,26 @@ impl<W: Write> Compressor<W> {
             writer.write_all(&[0x78, 0x01])?; // zlib header
         }
 
+        use CompressorInner::*;
+        let inner = match level {
+            0 => Uncompressed,
+            1 => Fast(GreedyCompressor::new(5, HashTableMatchFinder::new())),
+            2 => MediumFast(GreedyCompressor::new(6, HashChainMatchFinder::new(16, 64))),
+            3 => Medium(GreedyCompressor::new(6, HashChainMatchFinder::new(8, 16))),
+            4 => Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(16, 32))),
+            5 => Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(32, 64))),
+            6 => Medium(GreedyCompressor::new(
+                9,
+                HashChainMatchFinder::new(128, 128),
+            )),
+            7.. => Medium(GreedyCompressor::new(
+                9,
+                HashChainMatchFinder::new(256, 128),
+            )),
+        };
+
         Ok(Self {
-            inner: match level {
-                0 => CompressorInner::Uncompressed,
-                1 => CompressorInner::Fast(GreedyCompressor::new(5, HashTableMatchFinder::new())),
-                2 => CompressorInner::Fast(GreedyCompressor::new(9, HashTableMatchFinder::new())),
-                3 => CompressorInner::Medium(GreedyCompressor::new(6, HashChainMatchFinder::new(6, 16))),
-                4 => CompressorInner::Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(24, 24))),
-                5 => CompressorInner::Medium(GreedyCompressor::new(9, HashChainMatchFinder::new(32, 32))),
-                6.. => CompressorInner::Medium(GreedyCompressor::new(12, HashChainMatchFinder::new(128, 128))),
-            },
+            inner,
             writer: BitWriter::new(writer),
             input: InputStream {
                 data: Vec::new(),
@@ -127,7 +137,10 @@ impl<W: Write> Compressor<W> {
             match &mut self.inner {
                 CompressorInner::Uncompressed => {}
                 CompressorInner::Fast(fast) => fast.reset_indices(self.input.base_index),
-                CompressorInner::Medium(medium) => medium.reset_indices(self.input.base_index),
+                CompressorInner::MediumFast(medium) => medium.reset_indices(self.input.base_index),
+                CompressorInner::Medium(medium_high) => {
+                    medium_high.reset_indices(self.input.base_index)
+                }
             }
             self.input.base_index = 0;
         }
@@ -179,6 +192,7 @@ impl<W: Write> Compressor<W> {
 enum CompressorInner {
     Uncompressed,
     Fast(GreedyCompressor<HashTableMatchFinder>),
+    MediumFast(GreedyCompressor<HashChainMatchFinder<8>>),
     Medium(GreedyCompressor<HashChainMatchFinder>),
 }
 impl CompressorInner {
@@ -228,8 +242,11 @@ impl CompressorInner {
             CompressorInner::Fast(fast) => {
                 fast.compress(writer, input, base_index, start, flush)?
             }
-            CompressorInner::Medium(medium) => {
+            CompressorInner::MediumFast(medium) => {
                 medium.compress(writer, input, base_index, start, flush)?
+            }
+            CompressorInner::Medium(medium_high) => {
+                medium_high.compress(writer, input, base_index, start, flush)?
             }
         };
 

@@ -3,11 +3,9 @@ use crate::compress::{
     WINDOW_SIZE,
 };
 
-const CACHE_SIZE: usize = 65536; // 1 << 18;
+const CACHE_SIZE: usize = 65536;
 
-const MIN_MATCH: u16 = 4;
-
-pub(crate) struct HashChainMatchFinder {
+pub(crate) struct HashChainMatchFinder<const MIN_MATCH: u16 = 4> {
     hash_table: Box<[u32; CACHE_SIZE]>,
     links: Box<[u32; WINDOW_SIZE]>,
 
@@ -18,7 +16,7 @@ pub(crate) struct HashChainMatchFinder {
     /// Stop searching for matches if the length is at least this long.
     nice_length: u16,
 }
-impl HashChainMatchFinder {
+impl<const MIN_MATCH: u16> HashChainMatchFinder<MIN_MATCH> {
     pub(crate) fn new(search_depth: u16, nice_length: u16) -> Self {
         Self {
             hash_table: vec![0; CACHE_SIZE].into_boxed_slice().try_into().unwrap(),
@@ -30,7 +28,7 @@ impl HashChainMatchFinder {
     }
 }
 
-impl MatchFinder for HashChainMatchFinder {
+impl<const MIN_MATCH: u16> MatchFinder for HashChainMatchFinder<MIN_MATCH> {
     fn get_and_insert(
         &mut self,
         data: &[u8],
@@ -50,7 +48,8 @@ impl MatchFinder for HashChainMatchFinder {
         //     n >>= 2;
         // }
 
-        let hash = super::compute_hash(value & 0xFFFF_FFFF);
+        let mask = u64::MAX >> (8 * (8 - MIN_MATCH));
+        let hash = super::compute_hash(value & mask);
         let hash_index = (hash as usize) % CACHE_SIZE;
         let mut offset = self.hash_table[hash_index];
 
@@ -64,13 +63,17 @@ impl MatchFinder for HashChainMatchFinder {
                 break;
             }
 
-            let (length, start) = super::match_length4(
-                value as u32,
-                data,
-                anchor,
-                ip,
-                (offset - base_index) as usize,
-            );
+            let (length, start) = if MIN_MATCH >= 8 {
+                super::match_length8(value, data, anchor, ip, (offset - base_index) as usize)
+            } else {
+                super::match_length4(
+                    value as u32,
+                    data,
+                    anchor,
+                    ip,
+                    (offset - base_index) as usize,
+                )
+            };
             if length > best_length {
                 best_length = length;
                 best_offset = offset;
@@ -100,7 +103,9 @@ impl MatchFinder for HashChainMatchFinder {
     }
 
     fn insert(&mut self, value: u64, offset: u32) {
-        let hash = super::compute_hash(value & 0xFFFF_FFFF);
+        let mask = u64::MAX >> (8 * (8 - MIN_MATCH));
+
+        let hash = super::compute_hash(value & mask);
         let prev_offset = self.hash_table[(hash as usize) % CACHE_SIZE];
         self.hash_table[(hash as usize) % CACHE_SIZE] = offset as u32;
         self.links[offset as usize % WINDOW_SIZE] = prev_offset;

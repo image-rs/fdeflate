@@ -113,9 +113,19 @@ impl<M: MatchFinder> GreedyCompressor<M> {
                             // Skip inserting all the totally zero values into the hash table.
                             ip = m2.end() - 3;
                         } else {
-                            m2 = self
-                                .match_finder
-                                .get_and_insert(&data, base_index, last_match, ip, next);
+                            m2 = self.match_finder.get_and_insert(
+                                &data, base_index, ip, ip, next,
+                            );
+
+                            while m2.length < 258
+                                && m2.start > last_match
+                                && m2.start > m2.distance as usize + 1
+                                && data[m2.start - 1] == data[m2.start - m2.distance as usize - 1]
+                            {
+                                m2.length += 1;
+                                m2.start -= 1;
+                            }
+
                             ip += 1;
                         }
                     }
