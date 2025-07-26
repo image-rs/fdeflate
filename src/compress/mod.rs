@@ -75,7 +75,7 @@ impl<W: Write> Compressor<W> {
             4 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(16, 32))),
             5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(32, 64))),
             6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(128, 128))),
-            7.. => Medium(GreedyParser::new(9, HashChainMatchFinder::new(256, 128))),
+            7.. => Medium(GreedyParser::new(9, HashChainMatchFinder::new(512, 258))),
         };
 
         Ok(Self {
