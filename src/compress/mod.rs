@@ -255,9 +255,7 @@ impl CompressorInner {
 
 /// Compresses the given data.
 pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
-    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4), 2, true).unwrap();
-    compressor.write_data(input).unwrap();
-    compressor.finish().unwrap()
+    compress_to_vec_with_level(input, 1)
 }
 
 /// Compresses the given data with a specific compression level.
