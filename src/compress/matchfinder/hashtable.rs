@@ -38,7 +38,11 @@ impl MatchFinder for HashTableMatchFinder {
             let (length, start) =
                 super::match_length::<8>(value, data, anchor, ip, (offset - base_index) as usize);
             if length >= 8 {
-                return Match::new(length as u16, (ip - offset as usize) as u16, start);
+                return Match::new(
+                    length as u16,
+                    (ip - (offset - base_index) as usize) as u16,
+                    start,
+                );
             }
         }
 

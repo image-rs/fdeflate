@@ -90,7 +90,7 @@ impl<const MIN_MATCH: u16> MatchFinder for HashChainMatchFinder<MIN_MATCH> {
         if best_length >= MIN_MATCH {
             return Match {
                 length: best_length,
-                distance: (ip - best_offset as usize) as u16,
+                distance: (ip - (best_offset - base_index) as usize) as u16,
                 start: best_start,
             };
         }
