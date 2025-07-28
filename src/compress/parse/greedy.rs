@@ -98,8 +98,8 @@ impl<M: MatchFinder> GreedyParser<M> {
             // Insert match finder entries for the current match.
             assert!(m.end() >= ip);
             for j in ip..m.end().min(data.len() - 8) {
-                let v = u32::from_le_bytes(data[j..][..4].try_into().unwrap());
-                self.match_finder.insert(v as u64, base_index + j as u32);
+                let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
+                self.match_finder.insert(v, base_index + j as u32);
             }
             ip = m.end();
 
