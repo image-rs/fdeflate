@@ -211,7 +211,7 @@ impl CompressorInner {
                     writer.write_bits(0, 3)?;
                     let writer = writer.flush()?;
                     writer.write_all(&[0xff, 0xff, 0, 0])?;
-                    writer.write_all(&input[start..][..STORED_BLOCK_MAX_SIZE])?;
+                    writer.write_all(&input[..STORED_BLOCK_MAX_SIZE])?;
                     input = &input[STORED_BLOCK_MAX_SIZE..];
                     written += STORED_BLOCK_MAX_SIZE;
                 }
