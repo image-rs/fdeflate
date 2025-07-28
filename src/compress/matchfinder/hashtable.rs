@@ -28,7 +28,7 @@ impl MatchFinder for HashTableMatchFinder {
         let offset = self.hash_table[hash_index];
 
         // Insert current value
-        self.hash_table[hash_index] = ip as u32;
+        self.hash_table[hash_index] = ip as u32 + base_index;
 
         if offset >= min_offset {
             assert!(
