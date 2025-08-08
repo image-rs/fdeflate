@@ -70,12 +70,12 @@ impl<W: Write> Compressor<W> {
         let inner = match level {
             0 => Uncompressed,
             1 => Fast(GreedyParser::new(5, HashTableMatchFinder::new())),
-            2 => MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(16, 64))),
-            3 => Medium(GreedyParser::new(6, HashChainMatchFinder::new(8, 16))),
-            4 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(16, 32))),
-            5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(32, 64))),
-            6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(128, 128))),
-            7.. => Medium(GreedyParser::new(9, HashChainMatchFinder::new(512, 258))),
+            2 => MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(8, 16, 64))),
+            3 => Medium(GreedyParser::new(6, HashChainMatchFinder::new(6, 16, 32))),
+            4 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(5, 16, 32))),
+            5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 32, 64))),
+            6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 128, 128))),
+            7.. => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 512, 258))),
         };
 
         Ok(Self {
@@ -184,7 +184,7 @@ impl<W: Write> Compressor<W> {
 enum CompressorInner {
     Uncompressed,
     Fast(GreedyParser<HashTableMatchFinder>),
-    MediumFast(GreedyParser<HashChainMatchFinder<8>>),
+    MediumFast(GreedyParser<HashChainMatchFinder<true>>),
     Medium(GreedyParser<HashChainMatchFinder>),
 }
 impl CompressorInner {

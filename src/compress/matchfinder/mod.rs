@@ -60,7 +60,7 @@ fn compute_hash(v: u64) -> u32 {
 /// This function checks that `value` matches the 4 bytes (or 8 bytes if MIN_MATCH >= 8) at the
 /// previous index, and if so, searches both forwards and backwards to find the starting position
 /// and total length of the match.
-fn match_length<const MIN_MATCH: u16>(
+fn match_length<const MIN_MATCH8: bool>(
     value: u64,
     data: &[u8],
     anchor: usize,
@@ -75,7 +75,7 @@ fn match_length<const MIN_MATCH: u16>(
     let prev = u64::from_ne_bytes(data[prev_index..][..8].try_into().unwrap());
 
     let mut length;
-    if MIN_MATCH >= 8 {
+    if MIN_MATCH8 {
         if value != prev {
             return (0, ip);
         }
