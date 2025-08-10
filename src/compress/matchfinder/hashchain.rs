@@ -61,8 +61,9 @@ impl<const MIN_MATCH8: bool> MatchFinder for HashChainMatchFinder<MIN_MATCH8> {
         let mut offset = self.hash_table[hash_index];
 
         // Insert current value
-        self.hash_table[hash_index] = ip as u32 + base_index;
-        self.links[ip % WINDOW_SIZE] = offset;
+        let new_offset = ip as u32 + base_index;
+        self.hash_table[hash_index] = new_offset;
+        self.links[new_offset as usize % WINDOW_SIZE] = offset;
 
         // Visit previous matches
         loop {
