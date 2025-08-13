@@ -44,7 +44,7 @@ impl MatchFinder for HashTableMatchFinder {
             );
             if length >= 8 {
                 return Match::new(
-                    length as u16,
+                    length,
                     (ip - (offset - base_index) as usize) as u16,
                     start,
                 );

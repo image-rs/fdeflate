@@ -21,7 +21,7 @@ pub(crate) struct HashChainMatchFinder<const MIN_MATCH8: bool = false> {
 }
 impl<const MIN_MATCH8: bool> HashChainMatchFinder<MIN_MATCH8> {
     pub(crate) fn new(min_match: u16, search_depth: u16, nice_length: u16) -> Self {
-        assert!(min_match >= 4 && min_match <= 8);
+        assert!((4..=8).contains(&min_match));
         assert_eq!(min_match == 8, MIN_MATCH8);
 
         Self {
@@ -109,7 +109,7 @@ impl<const MIN_MATCH8: bool> MatchFinder for HashChainMatchFinder<MIN_MATCH8> {
     fn insert(&mut self, value: u64, offset: u32) {
         let hash = super::compute_hash(value & self.mask);
         let prev_offset = self.hash_table[(hash as usize) % CACHE_SIZE];
-        self.hash_table[(hash as usize) % CACHE_SIZE] = offset as u32;
+        self.hash_table[(hash as usize) % CACHE_SIZE] = offset;
         self.links[offset as usize % WINDOW_SIZE] = prev_offset;
     }
 

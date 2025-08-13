@@ -93,7 +93,7 @@ impl<M: MatchFinder> GreedyParser<M> {
                     self.ip = self.m.end() - 3; // Skip inserting all the totally zero values into the hash table.
                 } else {
                     self.m = self.match_finder.get_and_insert(
-                        &data,
+                        data,
                         base_index,
                         self.last_match,
                         self.ip,
@@ -133,7 +133,7 @@ impl<M: MatchFinder> GreedyParser<M> {
                 } else {
                     m2 = self
                         .match_finder
-                        .get_and_insert(&data, base_index, self.ip, self.ip, next);
+                        .get_and_insert(data, base_index, self.ip, self.ip, next);
 
                     while m2.length < 258
                         && m2.start > self.last_match
@@ -163,7 +163,7 @@ impl<M: MatchFinder> GreedyParser<M> {
                     });
                 }
                 self.symbols.push(Symbol::Backref {
-                    length: self.m.length as u16,
+                    length: self.m.length,
                     distance: self.m.distance,
                     dist_sym: bitstream::distance_to_dist_sym(self.m.distance),
                 });

@@ -149,7 +149,7 @@ pub(crate) fn write_block<W: Write>(
                 }
 
                 for &lit in groups.remainder() {
-                    writer.write_bits(codes[lit as usize] as u64, lengths[lit as usize] as u8)?;
+                    writer.write_bits(codes[lit as usize] as u64, lengths[lit as usize])?;
                 }
             }
             Symbol::Backref {
@@ -158,7 +158,7 @@ pub(crate) fn write_block<W: Write>(
                 dist_sym,
             } => {
                 let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
-                writer.write_bits(codes[sym] as u64, lengths[sym] as u8)?;
+                writer.write_bits(codes[sym] as u64, lengths[sym])?;
                 let len_extra = LENGTH_TO_LEN_EXTRA[*length as usize - 3];
                 let extra = (((*length as u32) - 3) & BITMASKS[len_extra as usize]) as u64;
                 writer.write_bits(extra, len_extra)?;
