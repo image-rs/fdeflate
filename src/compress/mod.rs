@@ -13,6 +13,8 @@ use bitwriter::BitWriter;
 use matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
 use parse::GreedyParser;
 
+use crate::compress::parse::RleParser;
+
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
 const WINDOW_SIZE: usize = 32768;
 
@@ -91,6 +93,28 @@ impl<W: Write> Compressor<W> {
         })
     }
 
+    /// Create a new compressor that only emits RLE matches.
+    ///
+    /// This mode is expected to be significantly faster even than level 1, but get somewhat worse
+    /// compression ratios. It corresponds to the Z_RLE option in zlib.
+    pub fn new_rle(mut writer: W, zlib: bool) -> io::Result<Self> {
+        if zlib {
+            writer.write_all(&[0x78, 0x01])?; // zlib header
+        }
+
+        Ok(Self {
+            inner: CompressorInner::Rle(RleParser::new(5)),
+            writer: BitWriter::new(writer),
+            input: InputStream {
+                data: Vec::new(),
+                base_index: 0,
+                written: 0,
+            },
+            window_size: 1,
+            checksum: zlib.then(Adler32::new),
+        })
+    }
+
     /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> std::io::Result<()> {
         // Encoders use 32-bit indices in various places for performance. Limiting the input size
@@ -128,6 +152,7 @@ impl<W: Write> Compressor<W> {
         if u64::from(self.input.base_index) + data.len() as u64 > u64::from(u32::MAX) {
             match &mut self.inner {
                 CompressorInner::Uncompressed => {}
+                CompressorInner::Rle(rle) => rle.reset_indices(self.input.base_index),
                 CompressorInner::Fast(fast) => fast.reset_indices(self.input.base_index),
                 CompressorInner::MediumFast(medium) => medium.reset_indices(self.input.base_index),
                 CompressorInner::Medium(medium_high) => {
@@ -183,6 +208,7 @@ impl<W: Write> Compressor<W> {
 
 enum CompressorInner {
     Uncompressed,
+    Rle(RleParser),
     Fast(GreedyParser<HashTableMatchFinder>),
     MediumFast(GreedyParser<HashChainMatchFinder<true>>),
     Medium(GreedyParser<HashChainMatchFinder>),
@@ -231,6 +257,7 @@ impl CompressorInner {
                 }
                 written
             }
+            CompressorInner::Rle(rle) => rle.compress(writer, input, base_index, start, flush)?,
             CompressorInner::Fast(fast) => {
                 fast.compress(writer, input, base_index, start, flush)?
             }
