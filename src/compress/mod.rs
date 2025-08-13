@@ -1,4 +1,7 @@
+mod bitstream;
 mod bitwriter;
+mod matchfinder;
+mod parse;
 mod ultrafast;
 
 use std::io::{self, Write};
@@ -7,6 +10,8 @@ use simd_adler32::Adler32;
 pub use ultrafast::UltraFastCompressor;
 
 use bitwriter::BitWriter;
+use matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
+use parse::GreedyParser;
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
 const WINDOW_SIZE: usize = 32768;
@@ -61,11 +66,20 @@ impl<W: Write> Compressor<W> {
             writer.write_all(&[0x78, 0x01])?; // zlib header
         }
 
+        use CompressorInner::*;
+        let inner = match level {
+            0 => Uncompressed,
+            1 => Fast(GreedyParser::new(5, HashTableMatchFinder::new())),
+            2 => MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(8, 16, 64))),
+            3 => Medium(GreedyParser::new(6, HashChainMatchFinder::new(6, 16, 32))),
+            4 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(5, 16, 32))),
+            5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 32, 64))),
+            6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 128, 128))),
+            7.. => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 512, 258))),
+        };
+
         Ok(Self {
-            inner: match level {
-                0 => CompressorInner::Uncompressed,
-                _ => CompressorInner::Uncompressed, // Placeholder for other compression levels
-            },
+            inner,
             writer: BitWriter::new(writer),
             input: InputStream {
                 data: Vec::new(),
@@ -79,6 +93,16 @@ impl<W: Write> Compressor<W> {
 
     /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> std::io::Result<()> {
+        // Encoders use 32-bit indices in various places for performance. Limiting the input size
+        // here simplifies things.
+        const CHUNK_SIZE: usize = 1024 * 1024 * 1024;
+        if data.len() > CHUNK_SIZE {
+            for chunk in data.chunks(CHUNK_SIZE) {
+                self.write_data(chunk)?;
+            }
+            return Ok(());
+        }
+
         if let Some(ref mut checksum) = self.checksum {
             checksum.write(data);
         }
@@ -98,6 +122,19 @@ impl<W: Write> Compressor<W> {
             self.input.base_index += start as u32;
             self.input.written = written - start;
             return Ok(());
+        }
+
+        // If the indices used by the compressor would overflow, reset the base index.
+        if u64::from(self.input.base_index) + data.len() as u64 > u64::from(u32::MAX) {
+            match &mut self.inner {
+                CompressorInner::Uncompressed => {}
+                CompressorInner::Fast(fast) => fast.reset_indices(self.input.base_index),
+                CompressorInner::MediumFast(medium) => medium.reset_indices(self.input.base_index),
+                CompressorInner::Medium(medium_high) => {
+                    medium_high.reset_indices(self.input.base_index)
+                }
+            }
+            self.input.base_index = 0;
         }
 
         // Append the new data to the input buffer and compress it.
@@ -146,13 +183,16 @@ impl<W: Write> Compressor<W> {
 
 enum CompressorInner {
     Uncompressed,
+    Fast(GreedyParser<HashTableMatchFinder>),
+    MediumFast(GreedyParser<HashChainMatchFinder<true>>),
+    Medium(GreedyParser<HashChainMatchFinder>),
 }
 impl CompressorInner {
     fn compress<W: Write>(
         &mut self,
         writer: &mut BitWriter<W>,
         input: &[u8],
-        _base_index: u32,
+        base_index: u32,
         start: usize,
         flush: Flush,
     ) -> std::io::Result<usize> {
@@ -171,7 +211,7 @@ impl CompressorInner {
                     writer.write_bits(0, 3)?;
                     let writer = writer.flush()?;
                     writer.write_all(&[0xff, 0xff, 0, 0])?;
-                    writer.write_all(&input[start..][..STORED_BLOCK_MAX_SIZE])?;
+                    writer.write_all(&input[..STORED_BLOCK_MAX_SIZE])?;
                     input = &input[STORED_BLOCK_MAX_SIZE..];
                     written += STORED_BLOCK_MAX_SIZE;
                 }
@@ -190,6 +230,15 @@ impl CompressorInner {
                     written += input.len();
                 }
                 written
+            }
+            CompressorInner::Fast(fast) => {
+                fast.compress(writer, input, base_index, start, flush)?
+            }
+            CompressorInner::MediumFast(medium) => {
+                medium.compress(writer, input, base_index, start, flush)?
+            }
+            CompressorInner::Medium(medium_high) => {
+                medium_high.compress(writer, input, base_index, start, flush)?
             }
         };
 
