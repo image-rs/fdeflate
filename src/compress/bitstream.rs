@@ -48,11 +48,24 @@ pub(crate) fn write_block<W: Write>(
     let mut frequencies = [0u32; 286];
     let mut dist_frequencies = [0u32; 30];
     frequencies[256] = 1;
+
+    let mut f2 = [0u32; 256];
+    let mut f3 = [0u32; 256];
+    let mut f4 = [0u32; 256];
+
     for symbol in symbols {
         match symbol {
             Symbol::LiteralRun { start, end } => {
-                for lit in &data[(*start - base_index) as usize..(*end - base_index) as usize] {
-                    frequencies[*lit as usize] += 1;
+                let mut chunks = data[(*start - base_index) as usize..(*end - base_index) as usize]
+                    .chunks_exact(4);
+                for chunk in &mut chunks {
+                    frequencies[chunk[0] as usize] += 1;
+                    f2[chunk[1] as usize] += 1;
+                    f3[chunk[2] as usize] += 1;
+                    f4[chunk[3] as usize] += 1;
+                }
+                for &lit in chunks.remainder() {
+                    frequencies[lit as usize] += 1;
                 }
             }
             Symbol::Backref {
@@ -63,6 +76,10 @@ pub(crate) fn write_block<W: Write>(
                 dist_frequencies[*dist_sym as usize] += 1;
             }
         }
+    }
+
+    for i in 0..256 {
+        frequencies[i] += f2[i] + f3[i] + f4[i];
     }
 
     let mut lengths = [0u8; 286];
