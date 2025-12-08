@@ -19,7 +19,7 @@ fuzz_target!(|input: (Vec<u8>, Vec<u8>)| {
         while !decoder.is_done() && input_index < input.0.len() {
             // println!("input_index: {} {}", input_index, input.0.len());
             let (consumed, produced) =
-                decoder.read(&input.0[input_index..], &mut output, output_index, false)?;
+                decoder.read(&input.0[input_index..], &mut output, output_index)?;
             input_index += consumed;
             output_index += produced;
             if output_index == output.len() {
@@ -32,8 +32,12 @@ fuzz_target!(|input: (Vec<u8>, Vec<u8>)| {
                 &input.1[input_index - input.0.len()..],
                 &mut output,
                 output_index,
-                true,
             )?;
+
+            if !decoder.is_done() && consumed == 0 && produced == 0 {
+                return Err(fdeflate::DecompressionError::InsufficientInput);
+            }
+
             input_index += consumed;
             output_index += produced;
             output.resize(output_index + 32 * 1024, 0);

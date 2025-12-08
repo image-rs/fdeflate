@@ -11,8 +11,8 @@ mod test_utils;
 use test_utils::decompress_by_chunks;
 
 fuzz_target!(|input: &[u8]| {
-    let r_whole = decompress_by_chunks(input, std::iter::repeat(input.len()), false);
-    let r_bytewise = decompress_by_chunks(input, std::iter::repeat(1), false);
+    let r_whole = decompress_by_chunks(input, std::iter::repeat(input.len()));
+    let r_bytewise = decompress_by_chunks(input, std::iter::repeat(1));
     match (r_whole, r_bytewise) {
         (Ok(output_whole), Ok(output_bytewise)) => assert_eq!(output_whole, output_bytewise),
         (Err(_e1), Err(_e2)) => (),
