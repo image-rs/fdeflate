@@ -1,9 +1,11 @@
 mod greedy;
+mod lazy;
 mod rle;
 
 use std::io::{self, Write};
 
 pub(crate) use greedy::*;
+pub(crate) use lazy::*;
 pub(crate) use rle::*;
 
 use crate::compress::{

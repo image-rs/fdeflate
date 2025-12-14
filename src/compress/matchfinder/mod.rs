@@ -4,6 +4,7 @@ mod hashtable;
 pub(crate) use hashchain::HashChainMatchFinder;
 pub(crate) use hashtable::HashTableMatchFinder;
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Match {
     pub length: u16,
     pub distance: u16,
@@ -33,6 +34,15 @@ impl Match {
 
     pub fn end(&self) -> usize {
         self.start + self.length as usize
+    }
+
+    pub fn advance_start(&mut self, min_start: usize) {
+        if min_start > self.end() {
+            self.length = 0;
+        } else if self.start < min_start {
+            self.length -= (min_start - self.start) as u16;
+            self.start = min_start;
+        }
     }
 }
 

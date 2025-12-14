@@ -13,7 +13,7 @@ use bitwriter::BitWriter;
 use matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
 use parse::GreedyParser;
 
-use crate::compress::parse::RleParser;
+use crate::compress::parse::{LazyParser, RleParser};
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
 const WINDOW_SIZE: usize = 32768;
@@ -75,9 +75,9 @@ impl<W: Write> Compressor<W> {
             2 => MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(8, 16, 64))),
             3 => Medium(GreedyParser::new(6, HashChainMatchFinder::new(6, 16, 32))),
             4 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(5, 16, 32))),
-            5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 32, 64))),
-            6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 128, 128))),
-            7.. => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 512, 258))),
+            5 => High(LazyParser::new(9, HashChainMatchFinder::new(4, 32, 64))),
+            6 => High(LazyParser::new(9, HashChainMatchFinder::new(4, 128, 128))),
+            7.. => High(LazyParser::new(9, HashChainMatchFinder::new(4, 512, 258))),
         };
 
         Ok(Self {
@@ -158,6 +158,7 @@ impl<W: Write> Compressor<W> {
                 CompressorInner::Medium(medium_high) => {
                     medium_high.reset_indices(self.input.base_index)
                 }
+                CompressorInner::High(high) => high.reset_indices(self.input.base_index),
             }
             self.input.base_index = 0;
         }
@@ -212,6 +213,7 @@ enum CompressorInner {
     Fast(GreedyParser<HashTableMatchFinder>),
     MediumFast(GreedyParser<HashChainMatchFinder<true>>),
     Medium(GreedyParser<HashChainMatchFinder>),
+    High(LazyParser<HashChainMatchFinder>),
 }
 impl CompressorInner {
     fn compress<W: Write>(
@@ -266,6 +268,9 @@ impl CompressorInner {
             }
             CompressorInner::Medium(medium_high) => {
                 medium_high.compress(writer, input, base_index, start, flush)?
+            }
+            CompressorInner::High(high) => {
+                high.compress(writer, input, base_index, start, flush)?
             }
         };
 
