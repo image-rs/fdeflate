@@ -75,8 +75,8 @@ impl<W: Write> Compressor<W> {
             2 => MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(8, 16, 64))),
             3 => Medium(GreedyParser::new(6, HashChainMatchFinder::new(6, 16, 32))),
             4 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(5, 16, 32))),
-            5 => High(LazyParser::new(9, HashChainMatchFinder::new(4, 32, 64))),
-            6 => High(LazyParser::new(9, HashChainMatchFinder::new(4, 128, 128))),
+            5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 32, 64))),
+            6 => High(LazyParser::new(9, HashChainMatchFinder::new(4, 64, 128))),
             7.. => High(LazyParser::new(9, HashChainMatchFinder::new(4, 512, 258))),
         };
 

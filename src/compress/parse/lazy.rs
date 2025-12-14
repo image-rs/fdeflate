@@ -16,7 +16,6 @@ pub(crate) struct LazyParser<M> {
     last_match: usize,
     m0: Match,
     m1: Match,
-    m2: Match,
 
     last_index: u32,
 }
@@ -31,7 +30,6 @@ impl<M: MatchFinder> LazyParser<M> {
             last_match: 0,
             m1: Match::empty(),
             m0: Match::empty(),
-            m2: Match::empty(),
             last_index: 0,
         }
     }
@@ -60,7 +58,7 @@ impl<M: MatchFinder> LazyParser<M> {
 
     fn find_match(&mut self, data: &[u8], base_index: u32) -> Match {
         let value = u64::from_le_bytes(data[self.ip..][..8].try_into().unwrap());
-        let m = if value as u32 == (value >> 8) as u32 {
+        if value as u32 == (value >> 8) as u32 {
             let m = Self::rle_match(data, self.last_match, self.ip);
             self.ip = m.end() - 3; // Skip inserting all the totally zero values into the hash table.
             m
@@ -68,18 +66,7 @@ impl<M: MatchFinder> LazyParser<M> {
             self.ip += 1;
             self.match_finder
                 .get_and_insert(data, base_index, self.last_match, self.ip - 1, value)
-        };
-
-        if !m.is_empty() {
-            let new_ip = m.end() - 2;
-            for j in self.ip..self.ip.min(data.len() - 8) {
-                let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                self.match_finder.insert(v, base_index + j as u32);
-            }
-            self.ip = new_ip;
         }
-
-        m
     }
 
     fn accept_match(&mut self, m: Match) {
@@ -96,25 +83,6 @@ impl<M: MatchFinder> LazyParser<M> {
             dist_sym: bitstream::distance_to_dist_sym(m.distance),
         });
         self.last_match = m.end();
-    }
-
-    fn accept_match_m1(&mut self) {
-        // if !self.m0.is_empty() {
-        //     self.m0.length = (self.m1.start - self.m0.start) as u16;
-        //     if self.m0.length >= 4 {
-        //         self.accept_match(self.m0);
-        //     }
-        // }
-        self.accept_match(self.m1);
-
-        self.m2.advance_start(self.m1.end());
-        if self.m2.length < 4 {
-            self.m2 = Match::empty();
-        }
-        self.m1 = self.m2;
-
-        self.m0 = Match::empty();
-        self.m2 = Match::empty();
     }
 
     fn advance(&mut self, data: &[u8], base_index: u32, new_ip: usize) {
@@ -168,73 +136,45 @@ impl<M: MatchFinder> LazyParser<M> {
             }
 
             assert!(self.last_match <= self.ip);
-            assert!(self.last_match <= self.m1.start,);
+            assert!(self.last_match <= self.m1.start);
 
-            if self.m2.is_empty() {
-                if self.ip < max_ip {
-                    assert!(self.ip < self.m1.end());
-                    self.m2 = self.find_match(data, base_index);
-                    if self.m2.length <= self.m1.length {
-                        self.m2 = Match::empty();
-                    }
-                } else if flush == Flush::None {
-                    break;
+            let mut m2 = Match::empty();
+            if self.ip < max_ip {
+                assert!(self.ip < self.m1.end());
+                m2 = self.find_match(data, base_index);
+                if m2.length <= self.m1.length {
+                    m2 = Match::empty();
                 }
+            } else if flush == Flush::None {
+                break;
             }
 
-            if self.m2.is_empty() {
+            if m2.is_empty() {
                 self.advance(data, base_index, self.m1.end());
-                self.accept_match_m1();
-                continue;
-            } else if self.m2.start <= self.m1.start {
-                self.m1 = self.m2;
-                self.m2 = Match::empty();
-                continue;
-            }
 
-            let mut m3 = Match::empty();
-            if self.ip < max_ip && !self.m2.is_empty() {
-                if self.ip < max_ip {
-                    assert!(self.ip < self.m2.end());
-                    m3 = self.find_match(data, base_index);
-                    if m3.length <= self.m2.length {
-                        m3 = Match::empty();
-                    }
-                } else if flush == Flush::None {
-                    break;
+                if !self.m0.is_empty() && self.m0.start + 4 <= self.m1.start {
+                    self.m0.length = self.m0.length.min((self.m1.start - self.m0.start) as u16);
+                    self.accept_match(self.m0);
+                    self.m0 = Match::empty();
                 }
-            }
 
-            if m3.is_empty() {
-                assert!(self.m1.length < self.m2.length);
-
-                if self.m2.start - self.m1.start <= 2 {
-                    self.advance(data, base_index, self.m2.end());
-                    self.m1 = self.m2;
-                    self.m2 = Match::empty();
-                    self.accept_match_m1();
-                } else {
-                    self.advance(data, base_index, self.m2.end());
-                    self.m1.length = (self.m2.start - self.m1.start).max(4) as u16;
-                    self.accept_match_m1();
-                    self.accept_match_m1();
-                }
-            } else if m3.start <= self.m2.start || m3.start < self.m1.end() {
-                self.m2 = m3;
+                self.accept_match(self.m1);
+                self.m0 = Match::empty();
+                self.m1 = Match::empty();
                 continue;
-            } else if m3.start == self.m1.end() {
-                self.m2 = m3;
-                self.accept_match_m1();
-            } else if m3.start <= self.m1.end() + 2 {
-                self.m2 = m3;
-                self.accept_match_m1();
+            } else if m2.start <= self.m1.start {
+                self.m1 = m2;
+                continue;
             } else {
-                assert!(self.m1.length < self.m2.length);
-                assert!(self.m2.length < m3.length);
+                assert!(self.m1.length < m2.length);
 
-                self.m1.length = 4;
-                self.accept_match_m1();
-                self.m2 = m3;
+                if self.m0.is_empty()
+                    || self.m1.start < self.m0.start
+                    || (self.m1.start == self.m0.start && self.m1.length > self.m0.length)
+                {
+                    self.m0 = self.m1;
+                }
+                self.m1 = m2;
             }
 
             // Write the block if we have enough symbols.
