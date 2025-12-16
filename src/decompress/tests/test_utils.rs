@@ -41,20 +41,12 @@ impl From<TestErrorKind> for TestDecompressionError {
 /// But `chunks` can also be used to replicate arbitrary chunking patterns (such as may be
 /// used by some fuzzing-based repros from the `png` crate).
 ///
-/// `early_eof` is used to the last `end_of_input` argument of `Decompressor::read` calls.
-/// When `early_eof` is `false`, then `end_of_input` is `false` until the whole input is
-/// consumed (and then is `Decompressor::is_done` is still false, then `Decompressor::read`
-/// is called one or more times with empty input slice and `end_of_input` set to true).
-/// When `early_eof` is `true` then `end_of_input` is set to `true` as soon as the slice
-/// fed to `Decompressor::read` "reaches" the end of the whole input.
-///
 /// Unlike the `png` crate, this testing helper uses a big, fixed-size output buffer.
 /// (i.e. there is no simulation of `ZlibStream.compact_out_buffer_if_needed` from the `png`
 /// crate).
 pub fn decompress_by_chunks(
     input: &[u8],
     chunks: impl IntoIterator<Item = usize>,
-    early_eof: bool,
 ) -> Result<Vec<u8>, TestDecompressionError> {
     let mut chunks = chunks.into_iter();
 
@@ -80,14 +72,8 @@ pub fn decompress_by_chunks(
         let start = in_pos;
         let end = std::cmp::min(start + chunk_size, input.len());
 
-        let eof = if early_eof {
-            end == input.len()
-        } else {
-            start == input.len()
-        };
-
         let (in_consumed, out_written) =
-            d.read(&input[start..end], out_buf.as_mut_slice(), out_pos, eof)?;
+            d.read(&input[start..end], out_buf.as_mut_slice(), out_pos)?;
 
         in_pos += in_consumed;
         out_pos += out_written;

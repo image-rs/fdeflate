@@ -26,7 +26,6 @@ fuzz_target!(|input: (u8, Vec<u8>)| {
                 &compressed[input_index..input_index + 1],
                 &mut decompressed,
                 output_position,
-                false,
             )
             .expect("Decompression failed!");
 

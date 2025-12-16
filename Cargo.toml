@@ -21,7 +21,7 @@ categories = ["compression"]
 simd-adler32 = "0.3.4"
 
 [dev-dependencies]
-miniz_oxide = "0.7.1"
+miniz_oxide = "0.8.9"
 rand = "0.8.5"
 
 [lints.rust]

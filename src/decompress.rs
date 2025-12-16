@@ -160,7 +160,6 @@ impl Decompressor {
     /// Returns the number of bytes read from `input` and the number of bytes written to `output`,
     /// or an error if the deflate stream is not valid. `input` is the compressed data. `output` is
     /// the buffer to write the decompressed data to, starting at index `output_position`.
-    /// `end_of_input` indicates whether more data may be available in the future.
     ///
     /// The contents of `output` after `output_position` are ignored. However, this function may
     /// write additional data to `output` past what is indicated by the return value.
@@ -170,6 +169,10 @@ impl Decompressor {
     /// - The output is full but there are more bytes to output.
     /// - The deflate stream is complete (and `is_done` will return true).
     ///
+    /// To detect whether the zlib stream was truncated before the final checksum, call the
+    /// `is_done` method after all input data has been consumed and no more data is written. If it returns false, then the
+    /// stream was truncated.
+    ///
     /// # Panics
     ///
     /// This function will panic if `output_position` is out of bounds.
@@ -178,7 +181,6 @@ impl Decompressor {
         input: &[u8],
         output: &mut [u8],
         output_position: usize,
-        end_of_input: bool,
     ) -> Result<(usize, usize), DecompressionError> {
         if let State::Done = self.state {
             return Ok((0, 0));
@@ -330,12 +332,8 @@ impl Decompressor {
             self.checksum.write(&output[output_position..output_index]);
         }
 
-        if self.state == State::Done || !end_of_input || output_index == output.len() {
-            let input_left = remaining_input.len();
-            Ok((input.len() - input_left, output_index - output_position))
-        } else {
-            Err(DecompressionError::InsufficientInput)
-        }
+        let input_left = remaining_input.len();
+        Ok((input.len() - input_left, output_index - output_position))
     }
 
     /// Returns true if the decompressor has finished decompressing the input.
@@ -1118,25 +1116,31 @@ pub fn decompress_to_vec_bounded(
     let mut output = vec![0; 1024.min(maxlen)];
     let mut input_index = 0;
     let mut output_index = 0;
+
     loop {
         let (consumed, produced) =
-            decoder.read(&input[input_index..], &mut output, output_index, true)?;
+            decoder.read(&input[input_index..], &mut output, output_index)?;
         input_index += consumed;
         output_index += produced;
-        if decoder.is_done() || output_index == maxlen {
-            break;
-        }
-        output.resize((output_index + 32 * 1024).min(maxlen), 0);
-    }
-    output.resize(output_index, 0);
 
-    if decoder.is_done() {
-        Ok(output)
-    } else {
-        Err(BoundedDecompressionError::OutputTooLarge {
-            partial_output: output,
-        })
+        if decoder.is_done() {
+            break;
+        } else if output_index == maxlen {
+            return Err(BoundedDecompressionError::OutputTooLarge {
+                partial_output: output,
+            });
+        } else if output_index == output.len() {
+            output.resize((output_index + 32 * 1024).min(maxlen), 0);
+            continue;
+        } else if input_index == input.len() {
+            return Err(DecompressionError::InsufficientInput.into());
+        } else {
+            unreachable!("Read() call violated post-condition");
+        }
     }
+
+    output.resize(output_index, 0);
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -1269,7 +1273,7 @@ mod tests {
         decompressor.ignore_adler32();
         let mut decompressed = vec![0; 1024];
         let decompressed_len = decompressor
-            .read(&compressed, &mut decompressed, 0, true)
+            .read(&compressed, &mut decompressed, 0)
             .unwrap()
             .1;
         assert_eq!(&decompressed[..decompressed_len], b"Hello world!");
@@ -1283,12 +1287,7 @@ mod tests {
         let mut decompressor = Decompressor::new();
         let mut decompressed = vec![0; 1024];
         let (input_consumed, output_written) = decompressor
-            .read(
-                &compressed[..compressed.len() - 1],
-                &mut decompressed,
-                0,
-                false,
-            )
+            .read(&compressed[..compressed.len() - 1], &mut decompressed, 0)
             .unwrap();
         assert_eq!(output_written, input.len());
         assert_eq!(input_consumed, compressed.len() - 1);
@@ -1298,7 +1297,6 @@ mod tests {
                 &compressed[input_consumed..],
                 &mut decompressed[..output_written],
                 output_written,
-                true,
             )
             .unwrap();
         assert!(decompressor.is_done());
@@ -1318,18 +1316,12 @@ mod tests {
             compressed.splice(2..2, [0u8, 0, 0, 0xff, 0xff].into_iter());
         }
 
-        // Ensure that the full input is decompressed, regardless of whether
-        // `end_of_input` is set.
-        for end_of_input in [true, false] {
-            let mut decompressor = Decompressor::new();
-            let (input_consumed, output_written) = decompressor
-                .read(&compressed, &mut [], 0, end_of_input)
-                .unwrap();
+        let mut decompressor = Decompressor::new();
+        let (input_consumed, output_written) = decompressor.read(&compressed, &mut [], 0).unwrap();
 
-            assert!(decompressor.is_done());
-            assert_eq!(input_consumed, compressed.len());
-            assert_eq!(output_written, 0);
-        }
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, compressed.len());
+        assert_eq!(output_written, 0);
     }
 
     mod test_utils;
@@ -1339,8 +1331,8 @@ mod tests {
     fn verify_no_sensitivity_to_input_chunking(
         input: &[u8],
     ) -> Result<Vec<u8>, TestDecompressionError> {
-        let r_whole = decompress_by_chunks(input, vec![input.len()], false);
-        let r_bytewise = decompress_by_chunks(input, std::iter::repeat(1), false);
+        let r_whole = decompress_by_chunks(input, vec![input.len()]);
+        let r_bytewise = decompress_by_chunks(input, std::iter::repeat(1));
         assert_eq!(r_whole, r_bytewise);
         r_whole // Returning an arbitrary result, since this is equal to `r_bytewise`.
     }
