@@ -170,7 +170,7 @@ impl Decompressor {
     /// - The deflate stream is complete (and `is_done` will return true).
     ///
     /// To detect whether the zlib stream was truncated before the final checksum, call the
-    /// `is_done` method after all input data has been consumed. If it returns false, then the
+    /// `is_done` method after all input data has been consumed and no more data is written. If it returns false, then the
     /// stream was truncated.
     ///
     /// # Panics
