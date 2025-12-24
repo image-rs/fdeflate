@@ -20,6 +20,7 @@ impl MatchFinder for HashTableMatchFinder {
         anchor: usize,
         ip: usize,
         value: u64,
+        _min_match: u16,
     ) -> Match {
         let min_offset = (base_index + (ip as u32).saturating_sub(32768)).max(1);
 

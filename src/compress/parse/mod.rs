@@ -65,7 +65,7 @@ impl<M: MatchFinder> ParserInner<M> {
             let anchor = if fizzle { self.ip } else { self.last_match };
             let mut m = self
                 .match_finder
-                .get_and_insert(data, base_index, anchor, self.ip, current);
+                .get_and_insert(data, base_index, anchor, self.ip, current, 4);
             if fizzle {
                 while m.length < 258
                     && m.start > self.last_match

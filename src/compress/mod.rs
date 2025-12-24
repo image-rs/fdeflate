@@ -82,8 +82,8 @@ impl<W: Write> Compressor<W> {
                 HashChainMatchFinder::new(4, 128, 128),
             )),
             7.. => High(LazyParser::new(
-                9,
-                32,
+                12,
+                128,
                 HashChainMatchFinder::new(4, 512, 258),
             )),
         };

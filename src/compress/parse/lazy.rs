@@ -58,7 +58,7 @@ impl<M: MatchFinder> LazyParser<M> {
         self.match_finder.reset_indices(old_base_index);
     }
 
-    fn find_match(&mut self, data: &[u8], base_index: u32) -> Match {
+    fn find_match(&mut self, data: &[u8], base_index: u32, min_match: u16) -> Match {
         let value = u64::from_le_bytes(data[self.ip..][..8].try_into().unwrap());
         if value as u32 == (value >> 8) as u32 {
             let m = Self::rle_match(data, self.last_match, self.ip);
@@ -66,8 +66,14 @@ impl<M: MatchFinder> LazyParser<M> {
             m
         } else {
             self.ip += 1;
-            self.match_finder
-                .get_and_insert(data, base_index, self.last_match, self.ip - 1, value)
+            self.match_finder.get_and_insert(
+                data,
+                base_index,
+                self.last_match,
+                self.ip - 1,
+                value,
+                min_match,
+            )
         }
     }
 
@@ -128,7 +134,7 @@ impl<M: MatchFinder> LazyParser<M> {
                     break;
                 }
 
-                self.m1 = self.find_match(data, base_index);
+                self.m1 = self.find_match(data, base_index, 4);
                 if self.m1.is_empty() {
                     // If we haven't found a match in a while, start skipping ahead by emitting
                     // multiple literals at once.
@@ -144,7 +150,7 @@ impl<M: MatchFinder> LazyParser<M> {
             if self.m1.length <= self.max_lazy {
                 if self.ip < max_ip {
                     assert!(self.ip < self.m1.end());
-                    m2 = self.find_match(data, base_index);
+                    m2 = self.find_match(data, base_index, self.m1.length + 1);
                     if m2.length <= self.m1.length {
                         m2 = Match::empty();
                     }
