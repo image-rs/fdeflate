@@ -9,6 +9,7 @@ use crate::compress::{
 pub(crate) struct LazyParser<M> {
     match_finder: M,
     skip_ahead_shift: u8,
+    max_lazy: u16,
 
     symbols: Vec<Symbol>,
 
@@ -21,10 +22,11 @@ pub(crate) struct LazyParser<M> {
 }
 
 impl<M: MatchFinder> LazyParser<M> {
-    pub fn new(skip_ahead_shift: u8, match_finder: M) -> Self {
+    pub fn new(skip_ahead_shift: u8, max_lazy: u16, match_finder: M) -> Self {
         Self {
             match_finder,
             skip_ahead_shift,
+            max_lazy,
             symbols: Vec::new(),
             ip: 0,
             last_match: 0,
@@ -139,14 +141,16 @@ impl<M: MatchFinder> LazyParser<M> {
             assert!(self.last_match <= self.m1.start);
 
             let mut m2 = Match::empty();
-            if self.ip < max_ip {
-                assert!(self.ip < self.m1.end());
-                m2 = self.find_match(data, base_index);
-                if m2.length <= self.m1.length {
-                    m2 = Match::empty();
+            if self.m1.length <= self.max_lazy {
+                if self.ip < max_ip {
+                    assert!(self.ip < self.m1.end());
+                    m2 = self.find_match(data, base_index);
+                    if m2.length <= self.m1.length {
+                        m2 = Match::empty();
+                    }
+                } else if flush == Flush::None {
+                    break;
                 }
-            } else if flush == Flush::None {
-                break;
             }
 
             if m2.is_empty() {
