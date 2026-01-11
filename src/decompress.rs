@@ -234,7 +234,7 @@ impl Decompressor {
                     if input0 & 0x0f != 0x08
                         || (input0 & 0xf0) > 0x70
                         || input1 & 0x20 != 0
-                        || ((input0 << 8) | input1) % 31 != 0
+                        || !((input0 << 8) | input1).is_multiple_of(31)
                     {
                         return Err(DecompressionError::BadZlibHeader);
                     }
