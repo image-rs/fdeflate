@@ -106,6 +106,41 @@ fn match_length<const MIN_MATCH8: bool>(
     (length as u16, ip)
 }
 
+#[inline(always)]
+pub(super) fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
+    let value = data[ip];
+
+    let mut m = Match::new(4, 1, ip + 1);
+    let min_start = 1.max(last_match).max(m.end().saturating_sub(258));
+    while m.start > min_start && data[m.start - 2] == value {
+        m.start -= 1;
+        m.length += 1;
+    }
+
+    let data = &data[m.end()..];
+    let data = &data[..data.len().min(258 - m.length as usize)];
+
+    let (chunks, remainder): (&[[u8; 8]], _) = data.as_chunks();
+    for &chunk in chunks {
+        if chunk != [value; 8] {
+            m.length += (u64::from_ne_bytes(chunk) ^ u64::from_ne_bytes([value; 8]))
+                .trailing_zeros() as u16
+                / 8;
+            return m;
+        }
+        m.length += 8;
+    }
+
+    for &byte in remainder {
+        if byte != value {
+            break;
+        }
+        m.length += 1;
+    }
+
+    m
+}
+
 pub(crate) trait MatchFinder {
     fn get_and_insert(
         &mut self,
