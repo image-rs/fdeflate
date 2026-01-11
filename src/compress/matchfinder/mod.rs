@@ -36,21 +36,6 @@ impl Match {
     }
 }
 
-pub(crate) trait MatchFinder {
-    fn get_and_insert(
-        &mut self,
-        data: &[u8],
-        base_index: u32,
-        anchor: usize,
-        ip: usize,
-        value: u64,
-    ) -> Match;
-
-    fn insert(&mut self, value: u64, offset: u32);
-
-    fn reset_indices(&mut self, old_base_index: u32);
-}
-
 fn compute_hash(v: u64) -> u32 {
     (11400714785074694791u64.wrapping_mul(v) >> 40) as u32
 }
@@ -121,37 +106,33 @@ fn match_length<const MIN_MATCH8: bool>(
     (length as u16, ip)
 }
 
-#[inline(always)]
-pub(super) fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
-    let value = data[ip];
+pub(crate) trait MatchFinder {
+    fn get_and_insert(
+        &mut self,
+        data: &[u8],
+        base_index: u32,
+        anchor: usize,
+        ip: usize,
+        value: u64,
+    ) -> Match;
 
-    let mut m = Match::new(4, 1, ip + 1);
-    let min_start = 1.max(last_match).max(m.end().saturating_sub(258));
-    while m.start > min_start && data[m.start - 2] == value {
-        m.start -= 1;
-        m.length += 1;
+    fn insert(&mut self, value: u64, offset: u32);
+
+    fn reset_indices(&mut self, old_base_index: u32);
+}
+
+pub(crate) struct NullMatchFinder;
+impl MatchFinder for NullMatchFinder {
+    fn get_and_insert(
+        &mut self,
+        _data: &[u8],
+        _base_index: u32,
+        _anchor: usize,
+        _ip: usize,
+        _value: u64,
+    ) -> Match {
+        Match::empty()
     }
-
-    let data = &data[m.end()..];
-    let data = &data[..data.len().min(258 - m.length as usize)];
-
-    let (chunks, remainder): (&[[u8; 8]], _) = data.as_chunks();
-    for &chunk in chunks {
-        if chunk != [value; 8] {
-            m.length += (u64::from_ne_bytes(chunk) ^ u64::from_ne_bytes([value; 8]))
-                .trailing_zeros() as u16
-                / 8;
-            return m;
-        }
-        m.length += 8;
-    }
-
-    for &byte in remainder {
-        if byte != value {
-            break;
-        }
-        m.length += 1;
-    }
-
-    m
+    fn insert(&mut self, _value: u64, _offset: u32) {}
+    fn reset_indices(&mut self, _old_base_index: u32) {}
 }

@@ -1,40 +1,34 @@
 use std::io::{self, Write};
 
 use crate::compress::{
-    bitstream::{self, Symbol},
-    matchfinder::{rle_match, Match, MatchFinder},
+    matchfinder::{Match, MatchFinder},
+    parse::ParserInner,
     BitWriter, Flush,
 };
 
 pub(crate) struct GreedyParser<M> {
-    match_finder: M,
-    skip_ahead_shift: u8,
-
-    symbols: Vec<Symbol>,
-
-    ip: usize,
-    last_match: usize,
+    inner: ParserInner<M>,
     m: Match,
-
-    last_index: u32,
 }
 
 impl<M: MatchFinder> GreedyParser<M> {
     pub fn new(skip_ahead_shift: u8, match_finder: M) -> Self {
         Self {
-            match_finder,
-            skip_ahead_shift,
-            symbols: Vec::new(),
-            ip: 0,
-            last_match: 0,
+            inner: ParserInner {
+                match_finder,
+                skip_ahead_shift,
+                symbols: Vec::new(),
+                last_match: 0,
+                last_block_end: 0,
+                last_index: 0,
+                ip: 0,
+            },
             m: Match::empty(),
-            last_index: 0,
         }
     }
 
     pub fn reset_indices(&mut self, old_base_index: u32) {
-        self.last_index -= old_base_index;
-        self.match_finder.reset_indices(old_base_index);
+        self.inner.reset_indices(old_base_index);
     }
 
     /// Compress the data using a greedy algorithm.
@@ -46,89 +40,31 @@ impl<M: MatchFinder> GreedyParser<M> {
         start: usize,
         flush: Flush,
     ) -> io::Result<usize> {
-        assert!(base_index as u64 + data.len() as u64 <= u32::MAX as u64);
-
-        let delta = base_index - self.last_index;
-        self.ip -= delta as usize;
-        self.last_match -= delta as usize;
+        let delta = self.inner.start_compress(data, base_index, start);
         if !self.m.is_empty() {
             self.m.start -= delta as usize;
         }
-        self.last_index = base_index;
 
-        let mut last_block_end = start;
-
-        let max_ip = if flush == Flush::None {
-            data.len().saturating_sub(258 + 8)
-        } else {
-            data.len().saturating_sub(7)
-        };
+        let lookahead = if flush == Flush::None { 258 + 8 } else { 7 };
+        let max_ip = data.len().saturating_sub(lookahead);
 
         loop {
+            // Find a match if we don't yet have one.
             if self.m.is_empty() {
-                if self.ip >= max_ip {
+                self.m = self.inner.advance_to_match(data, base_index, max_ip);
+                if self.m.is_empty() {
                     break;
                 }
-
-                let current = u64::from_le_bytes(data[self.ip..][..8].try_into().unwrap());
-                if current as u32 == (current >> 8) as u32 {
-                    self.m = rle_match(data, self.last_match, self.ip);
-                    self.ip = self.m.end() - 3; // Skip inserting all the totally zero values into the hash table.
-                } else {
-                    self.m = self.match_finder.get_and_insert(
-                        data,
-                        base_index,
-                        self.last_match,
-                        self.ip,
-                        current,
-                    );
-                    self.ip += 1;
-                }
-
-                if self.m.is_empty() {
-                    // If we haven't found a match in a while, start skipping ahead by emitting
-                    // multiple literals at once.
-                    self.ip += (self.ip - self.last_match) >> self.skip_ahead_shift;
-                    continue;
-                }
             }
-
-            assert!(self.last_match <= self.ip);
-            assert!(self.last_match <= self.m.start);
 
             // Insert match finder entries for the current match.
-            assert!(self.m.end() >= self.ip);
-            for j in self.ip..self.m.end().min(data.len() - 8) {
-                let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                self.match_finder.insert(v, base_index + j as u32);
-            }
-            self.ip = self.m.end();
+            self.inner.advance(data, base_index, self.m.end());
 
             // Do a lookup at the position following the match. We'll need this even if we
             // accept the match, so it doesn't cost anything.
             let mut m2 = Match::empty();
-            if self.ip < max_ip {
-                let next = u64::from_le_bytes(data[self.ip..][..8].try_into().unwrap());
-                if next as u32 == (next >> 8) as u32 {
-                    m2 = rle_match(data, self.last_match, self.ip);
-                    // Skip inserting all the totally zero values into the hash table.
-                    self.ip = m2.end() - 3;
-                } else {
-                    m2 = self
-                        .match_finder
-                        .get_and_insert(data, base_index, self.ip, self.ip, next);
-
-                    while m2.length < 258
-                        && m2.start > self.last_match
-                        && m2.start > m2.distance as usize + 1
-                        && data[m2.start - 1] == data[m2.start - m2.distance as usize - 1]
-                    {
-                        m2.length += 1;
-                        m2.start -= 1;
-                    }
-
-                    self.ip += 1;
-                }
+            if self.inner.ip < max_ip {
+                m2 = self.inner.get_match(data, base_index, true);
             } else if flush == Flush::None {
                 break;
             }
@@ -138,26 +74,14 @@ impl<M: MatchFinder> GreedyParser<M> {
             // overlap. If so, it'll probably be cheaper to emit an extra literal rather than an
             // extra backref.
             if m2.is_empty() || m2.start > self.m.start + 1 {
-                assert!(self.last_match <= self.m.start);
-                if self.m.start > self.last_match {
-                    self.symbols.push(Symbol::LiteralRun {
-                        start: base_index + self.last_match as u32,
-                        end: base_index + self.m.start as u32,
-                    });
-                }
-                self.symbols.push(Symbol::Backref {
-                    length: self.m.length,
-                    distance: self.m.distance,
-                    dist_sym: bitstream::distance_to_dist_sym(self.m.distance),
-                });
-                self.last_match = self.m.end();
+                self.inner.insert_match(base_index, &self.m);
 
                 // If the next match starts before the end of the current match, we need to
                 // adjust the next match length and start position.
-                if m2.length > 0 && m2.start < self.last_match {
+                if !m2.is_empty() && m2.start < self.inner.last_match {
                     assert!(m2.length >= 3);
-                    m2.length -= (self.last_match - m2.start) as u16;
-                    m2.start = self.last_match;
+                    m2.length -= (self.inner.last_match - m2.start) as u16;
+                    m2.start = self.inner.last_match;
                     if m2.length < 4 {
                         m2 = Match::empty();
                     }
@@ -167,37 +91,11 @@ impl<M: MatchFinder> GreedyParser<M> {
             // Advance to the next match (which might have a length of zero)
             self.m = m2;
 
-            // Write the block if we have enough symbols.
-            if self.symbols.len() >= 16384 {
-                let last_block = flush == Flush::Finish && self.last_match == data.len();
-                bitstream::write_block(writer, data, base_index, &self.symbols, last_block)?;
-                self.symbols.clear();
-                last_block_end = self.last_match;
-            }
+            self.inner
+                .write_block_if_ready(writer, data, base_index, flush)?;
         }
 
-        // If a flush was requested and there's remaining symbols, write another block.
-        if flush != Flush::None && (!self.symbols.is_empty() || self.last_match < data.len()) {
-            // The skip ahead logic can overshoot the end of the data.
-            self.ip = self.ip.min(data.len());
-
-            // Append a final literal run if there's remaining input.
-            if self.last_match < data.len() {
-                self.symbols.push(Symbol::LiteralRun {
-                    start: base_index + self.last_match as u32,
-                    end: base_index + data.len() as u32,
-                });
-                self.ip = data.len();
-                self.last_match = data.len();
-            }
-            assert_eq!(self.ip, data.len());
-
-            let last_block = flush == Flush::Finish;
-            bitstream::write_block(writer, data, base_index, &self.symbols, last_block)?;
-            self.symbols.clear();
-            last_block_end = self.ip;
-        }
-
-        Ok(last_block_end - start)
+        self.inner
+            .end_compress(writer, data, base_index, start, flush)
     }
 }
