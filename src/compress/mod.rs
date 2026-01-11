@@ -289,3 +289,17 @@ pub fn compress_to_vec_with_level(input: &[u8], level: u8) -> Vec<u8> {
     compressor.write_data(input).unwrap();
     compressor.finish().unwrap()
 }
+
+/// Compresses the given data using only RLE matches.
+pub fn compress_to_vec_rle(input: &[u8]) -> Vec<u8> {
+    let mut compressor = Compressor::new_rle(Vec::with_capacity(input.len() / 4), true).unwrap();
+    compressor.write_data(input).unwrap();
+    compressor.finish().unwrap()
+}
+
+/// Compresses the given data using the ultra fast compression method.
+pub fn compress_to_vec_ultra_fast(input: &[u8]) -> Vec<u8> {
+    let mut compressor = UltraFastCompressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
+    compressor.write_data(input).unwrap();
+    compressor.finish().unwrap()
+}
