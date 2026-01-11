@@ -38,7 +38,6 @@ pub(crate) enum Symbol {
     },
 }
 
-#[inline(always)]
 pub(crate) fn write_block<W: Write>(
     writer: &mut BitWriter<W>,
     data: &[u8],
