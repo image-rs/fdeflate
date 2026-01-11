@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use crate::compress::{
     bitstream::{self, Symbol},
-    matchfinder::Match,
+    matchfinder::rle_match,
     BitWriter, Flush,
 };
 
@@ -26,23 +26,6 @@ impl RleParser {
             last_match: 0,
             last_index: 0,
         }
-    }
-
-    fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
-        let value = data[ip];
-
-        let mut m = Match::new(4, 1, ip + 1);
-        let min_start = 1.max(last_match).max(m.end().saturating_sub(258));
-
-        while m.start > min_start && data[m.start - 2] == value {
-            m.start -= 1;
-            m.length += 1;
-        }
-        while m.length < 258 && data.get(m.end()) == Some(&value) {
-            m.length += 1;
-        }
-
-        m
     }
 
     pub fn reset_indices(&mut self, old_base_index: u32) {
@@ -79,7 +62,7 @@ impl RleParser {
                 continue;
             }
 
-            let m = Self::rle_match(data, self.last_match, self.ip);
+            let m = rle_match(data, self.last_match, self.ip);
             self.ip = m.end();
 
             assert!(self.last_match <= self.ip);
