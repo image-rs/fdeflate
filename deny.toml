@@ -1,20 +1,14 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "deny"
+unmaintained = "workspace"
 ignore = []
 
 [bans]
 multiple-versions = "deny"
 deny = []
 skip = []
-skip-tree = [
-    { name = "criterion" },  # dev-dependency
-]
+skip-tree = []
 
 [licenses]
-unlicensed = "allow"
-allow-osi-fsf-free = "either"
-copyleft = "allow"
+allow = ["MIT", "Apache-2.0"]
