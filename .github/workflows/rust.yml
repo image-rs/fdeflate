@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rust: ["1.74.0", stable, beta, nightly]
+        rust: ["1.88.0", stable, beta, nightly]
     steps:
     - uses: actions/checkout@v2
     - uses: dtolnay/rust-toolchain@v1
