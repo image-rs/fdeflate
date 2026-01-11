@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use crate::compress::{
     bitstream::{self, Symbol},
-    matchfinder::{Match, MatchFinder},
+    matchfinder::{rle_match, Match, MatchFinder},
     BitWriter, Flush,
 };
 
@@ -30,23 +30,6 @@ impl<M: MatchFinder> GreedyParser<M> {
             m: Match::empty(),
             last_index: 0,
         }
-    }
-
-    fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
-        let value = data[ip];
-
-        let mut m = Match::new(4, 1, ip + 1);
-        let min_start = 1.max(last_match).max(m.end().saturating_sub(258));
-
-        while m.start > min_start && data[m.start - 2] == value {
-            m.start -= 1;
-            m.length += 1;
-        }
-        while m.length < 258 && data.get(m.end()) == Some(&value) {
-            m.length += 1;
-        }
-
-        m
     }
 
     pub fn reset_indices(&mut self, old_base_index: u32) {
@@ -89,7 +72,7 @@ impl<M: MatchFinder> GreedyParser<M> {
 
                 let current = u64::from_le_bytes(data[self.ip..][..8].try_into().unwrap());
                 if current as u32 == (current >> 8) as u32 {
-                    self.m = Self::rle_match(data, self.last_match, self.ip);
+                    self.m = rle_match(data, self.last_match, self.ip);
                     self.ip = self.m.end() - 3; // Skip inserting all the totally zero values into the hash table.
                 } else {
                     self.m = self.match_finder.get_and_insert(
@@ -127,7 +110,7 @@ impl<M: MatchFinder> GreedyParser<M> {
             if self.ip < max_ip {
                 let next = u64::from_le_bytes(data[self.ip..][..8].try_into().unwrap());
                 if next as u32 == (next >> 8) as u32 {
-                    m2 = Self::rle_match(data, self.last_match, self.ip);
+                    m2 = rle_match(data, self.last_match, self.ip);
                     // Skip inserting all the totally zero values into the hash table.
                     self.ip = m2.end() - 3;
                 } else {

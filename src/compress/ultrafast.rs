@@ -29,7 +29,7 @@ impl<W: Write> UltraFastCompressor<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if self.nbits % 8 != 0 {
+        if !self.nbits.is_multiple_of(8) {
             self.write_bits(0, 8 - self.nbits % 8)?;
         }
         if self.nbits > 0 {
