@@ -24,6 +24,18 @@ struct ParserInner<M> {
     last_index: u32,
 }
 impl<M: MatchFinder> ParserInner<M> {
+    fn new(skip_ahead_shift: u8, match_finder: M) -> Self {
+        Self {
+            match_finder,
+            skip_ahead_shift,
+            symbols: Vec::new(),
+            ip: 0,
+            last_match: 0,
+            last_block_end: 0,
+            last_index: 0,
+        }
+    }
+
     fn reset_indices(&mut self, old_base_index: u32) {
         self.last_match -= old_base_index as usize;
         self.match_finder.reset_indices(old_base_index);
@@ -84,6 +96,7 @@ impl<M: MatchFinder> ParserInner<M> {
         Match::empty()
     }
 
+    /// Insert match finder entries for the given range.
     #[inline(always)]
     fn advance(&mut self, data: &[u8], base_index: u32, end: usize) {
         assert!(self.last_match <= self.ip);

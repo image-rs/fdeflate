@@ -9,15 +9,7 @@ pub(crate) struct RleParser {
 impl RleParser {
     pub fn new(skip_ahead_shift: u8) -> Self {
         Self {
-            inner: ParserInner {
-                match_finder: NullMatchFinder,
-                skip_ahead_shift,
-                symbols: Vec::new(),
-                last_block_end: 0,
-                last_index: 0,
-                last_match: 0,
-                ip: 0,
-            },
+            inner: ParserInner::new(skip_ahead_shift, NullMatchFinder),
         }
     }
 

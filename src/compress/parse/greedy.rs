@@ -14,15 +14,7 @@ pub(crate) struct GreedyParser<M> {
 impl<M: MatchFinder> GreedyParser<M> {
     pub fn new(skip_ahead_shift: u8, match_finder: M) -> Self {
         Self {
-            inner: ParserInner {
-                match_finder,
-                skip_ahead_shift,
-                symbols: Vec::new(),
-                last_match: 0,
-                last_block_end: 0,
-                last_index: 0,
-                ip: 0,
-            },
+            inner: ParserInner::new(skip_ahead_shift, match_finder),
             m: Match::empty(),
         }
     }
@@ -42,7 +34,7 @@ impl<M: MatchFinder> GreedyParser<M> {
     ) -> io::Result<usize> {
         let delta = self.inner.start_compress(data, base_index, start);
         if !self.m.is_empty() {
-            self.m.start -= delta as usize;
+            self.m.start -= delta;
         }
 
         let lookahead = if flush == Flush::None { 258 + 8 } else { 7 };
@@ -75,6 +67,8 @@ impl<M: MatchFinder> GreedyParser<M> {
             // extra backref.
             if m2.is_empty() || m2.start > self.m.start + 1 {
                 self.inner.insert_match(base_index, &self.m);
+                self.inner
+                    .write_block_if_ready(writer, data, base_index, flush)?;
 
                 // If the next match starts before the end of the current match, we need to
                 // adjust the next match length and start position.
@@ -90,9 +84,6 @@ impl<M: MatchFinder> GreedyParser<M> {
 
             // Advance to the next match (which might have a length of zero)
             self.m = m2;
-
-            self.inner
-                .write_block_if_ready(writer, data, base_index, flush)?;
         }
 
         self.inner
