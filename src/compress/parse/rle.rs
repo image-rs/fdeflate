@@ -37,7 +37,7 @@ impl RleParser {
             }
 
             self.inner.ip = m.end();
-            self.inner.insert_match(base_index, &m);
+            self.inner.insert_match(base_index, m);
             self.inner
                 .write_block_if_ready(writer, data, base_index, flush)?;
         }

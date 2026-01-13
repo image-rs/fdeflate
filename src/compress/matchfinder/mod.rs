@@ -1,8 +1,10 @@
 mod hashchain;
 mod hashtable;
+mod hybrid;
 
 pub(crate) use hashchain::HashChainMatchFinder;
 pub(crate) use hashtable::HashTableMatchFinder;
+pub(crate) use hybrid::HybridMatchFinder;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Match {
@@ -150,7 +152,6 @@ pub(crate) trait MatchFinder {
         anchor: usize,
         ip: usize,
         value: u64,
-        min_match: u16,
     ) -> Match;
 
     fn insert(&mut self, value: u64, offset: u32);
@@ -167,7 +168,6 @@ impl MatchFinder for NullMatchFinder {
         _anchor: usize,
         _ip: usize,
         _value: u64,
-        _min_match: u16,
     ) -> Match {
         Match::empty()
     }
