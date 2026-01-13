@@ -36,21 +36,6 @@ impl Match {
     }
 }
 
-pub(crate) trait MatchFinder {
-    fn get_and_insert(
-        &mut self,
-        data: &[u8],
-        base_index: u32,
-        anchor: usize,
-        ip: usize,
-        value: u64,
-    ) -> Match;
-
-    fn insert(&mut self, value: u64, offset: u32);
-
-    fn reset_indices(&mut self, old_base_index: u32);
-}
-
 fn compute_hash(v: u64) -> u32 {
     (11400714785074694791u64.wrapping_mul(v) >> 40) as u32
 }
@@ -154,4 +139,35 @@ pub(super) fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
     }
 
     m
+}
+
+pub(crate) trait MatchFinder {
+    fn get_and_insert(
+        &mut self,
+        data: &[u8],
+        base_index: u32,
+        anchor: usize,
+        ip: usize,
+        value: u64,
+    ) -> Match;
+
+    fn insert(&mut self, value: u64, offset: u32);
+
+    fn reset_indices(&mut self, old_base_index: u32);
+}
+
+pub(crate) struct NullMatchFinder;
+impl MatchFinder for NullMatchFinder {
+    fn get_and_insert(
+        &mut self,
+        _data: &[u8],
+        _base_index: u32,
+        _anchor: usize,
+        _ip: usize,
+        _value: u64,
+    ) -> Match {
+        Match::empty()
+    }
+    fn insert(&mut self, _value: u64, _offset: u32) {}
+    fn reset_indices(&mut self, _old_base_index: u32) {}
 }
