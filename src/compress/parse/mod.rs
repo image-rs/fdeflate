@@ -58,8 +58,6 @@ impl<M: MatchFinder> ParserInner<M> {
     fn get_match(&mut self, data: &[u8], base_index: u32, fizzle: bool) -> Match {
         let current = u64::from_le_bytes(data[self.ip..][..8].try_into().unwrap());
         if current as u32 == (current >> 8) as u32 {
-            // TODO: Handle min_match here?
-
             let m = rle_match(data, self.last_match, self.ip);
             self.ip = m.end() - 3; // Skip inserting all the totally zero values into the hash table.
             m
@@ -104,7 +102,6 @@ impl<M: MatchFinder> ParserInner<M> {
     #[inline(always)]
     fn advance(&mut self, data: &[u8], base_index: u32, end: usize) {
         assert!(self.last_match <= self.ip);
-        // assert!(end >= self.ip);
 
         for j in self.ip..end.min(data.len() - 8) {
             let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
