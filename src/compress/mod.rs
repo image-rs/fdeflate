@@ -82,8 +82,8 @@ impl<W: Write> Compressor<W> {
             6 => High(LazyParser::new(9, 16, HybridMatchFinder::new(4, 128, 128))),
             7.. => High(LazyParser::new(
                 12,
-                128,
-                HybridMatchFinder::new(4, 512, 258),
+                256,
+                HybridMatchFinder::new(4, 256, 258),
             )),
         };
 
