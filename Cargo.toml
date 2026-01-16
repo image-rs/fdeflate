@@ -18,7 +18,6 @@ homepage = "https://github.com/image-rs/fdeflate"
 categories = ["compression"]
 
 [dependencies]
-innumerable = "0.1.0"
 simd-adler32 = "0.3.4"
 
 [dev-dependencies]
