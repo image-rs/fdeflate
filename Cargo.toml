@@ -1,7 +1,8 @@
 [package]
 name = "fdeflate"
-version = "0.3.7"
+version = "0.4.0"
 edition = "2021"
+publish = false
 
 # note: when changed, also update test runner in `.github/workflows/rust.yml`
 rust-version = "1.88.0"
