@@ -66,7 +66,7 @@ impl<M: MatchFinder> GreedyParser<M> {
             // overlap. If so, it'll probably be cheaper to emit an extra literal rather than an
             // extra backref.
             if m2.is_empty() || m2.start > self.m.start + 1 {
-                self.inner.insert_match(base_index, &self.m);
+                self.inner.insert_match(base_index, self.m);
                 self.inner
                     .write_block_if_ready(writer, data, base_index, flush)?;
 

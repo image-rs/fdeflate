@@ -1,9 +1,11 @@
 mod greedy;
+mod lazy;
 mod rle;
 
 use std::io::{self, Write};
 
 pub(crate) use greedy::*;
+pub(crate) use lazy::*;
 pub(crate) use rle::*;
 
 use crate::compress::{
@@ -100,17 +102,16 @@ impl<M: MatchFinder> ParserInner<M> {
     #[inline(always)]
     fn advance(&mut self, data: &[u8], base_index: u32, end: usize) {
         assert!(self.last_match <= self.ip);
-        assert!(end >= self.ip);
 
         for j in self.ip..end.min(data.len() - 8) {
             let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
             self.match_finder.insert(v, base_index + j as u32);
         }
-        self.ip = end;
+        self.ip = self.ip.max(end);
     }
 
     #[inline(always)]
-    fn insert_match(&mut self, base_index: u32, m: &Match) {
+    fn insert_match(&mut self, base_index: u32, m: Match) {
         assert!(self.last_match <= m.start);
         if m.start > self.last_match {
             self.symbols.push(Symbol::LiteralRun {

@@ -1,9 +1,12 @@
 mod hashchain;
 mod hashtable;
+mod hybrid;
 
 pub(crate) use hashchain::HashChainMatchFinder;
 pub(crate) use hashtable::HashTableMatchFinder;
+pub(crate) use hybrid::HybridMatchFinder;
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Match {
     pub length: u16,
     pub distance: u16,
