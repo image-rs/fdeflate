@@ -115,7 +115,7 @@ impl HybridMatchFinder {
             best_start = start;
         }
 
-        if best_length >= self.min_match {
+        if best_length >= min_match {
             return Match {
                 length: best_length,
                 distance: (ip - (best_offset - base_index) as usize) as u16,
