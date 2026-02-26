@@ -8,7 +8,7 @@ A fast, safe, and modern zlib implementation for PNG.
 
 ## Overview
 
-This crate contains an optimized implementation of the [deflate algorithm](https://en.wikipedia.org/wiki/Deflate) tuned for PNG images, but capable of handling arbitrary data. It was created to serve as the compression backend for the [`png`](https://crates.io/crates/png) crate, but can be used as a standalone library. The upcoming 0.4.x series features a fully compatible streaming encoder supporting uncompressed output, traditional levels 1-9, and two specialized compression levels designed for PNG images.
+This crate contains an optimized implementation of the [deflate algorithm](https://en.wikipedia.org/wiki/Deflate) tuned for PNG images, but capable of handling arbitrary data. It was created to serve as the compression backend for the [`png`](https://crates.io/crates/png) crate and can also be used as a standalone library. The upcoming 0.4.x series will feature a fully compatible streaming encoder supporting uncompressed output, traditional levels 1-9, and two specialized compression levels designed for PNG images.
 
 ## Decompression
 
@@ -20,7 +20,7 @@ The decoder employs several modern features than help it achieve exceptional per
 
 ## Compression
 
-The compressor is still under active development, with the current status visible on the main branch.
+The compressor is still under active development, with the current status tracked on the main branch.
 
 <!-- Internally, `fdeflate` (like other compression libraries) maps different compression levels to different algorithms and parameters. -->
 
@@ -39,7 +39,7 @@ In the 0.3.x series, the ultra-fast mode is the only supported compression mode.
 
 ## Inspiration
 
-The algorithms in this crate take inspiration many other compression libraries:
+The algorithms in this crate take inspiration many other compression including libraries:
 [fpnge](https://github.com/veluca93/fpnge),
 [lz4](https://github.com/lz4/lz4),
 [xz-utils](https://tukaani.org/xz/)
