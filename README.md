@@ -39,7 +39,7 @@ In the 0.3.x series, the ultra-fast mode is the only supported compression mode.
 
 ## Inspiration
 
-The algorithms in this crate take inspiration many other compression including libraries:
+The algorithms in this crate take inspiration many other compression libraries including:
 [fpnge](https://github.com/veluca93/fpnge),
 [lz4](https://github.com/lz4/lz4),
 [xz-utils](https://tukaani.org/xz/)
