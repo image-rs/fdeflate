@@ -138,7 +138,13 @@ impl<M: MatchFinder> ParserInner<M> {
         // Write the block if we have enough symbols.
         if self.symbols.len() >= 16384 {
             let last_block = flush == Flush::Finish && self.last_match == data.len();
-            bitstream::write_block(writer, data, base_index, &self.symbols, last_block)?;
+            bitstream::write_block(
+                writer,
+                &data[self.last_block_end..self.last_match],
+                base_index + self.last_block_end as u32,
+                &self.symbols,
+                last_block,
+            )?;
             self.symbols.clear();
             self.last_block_end = self.last_match;
         }
@@ -171,7 +177,13 @@ impl<M: MatchFinder> ParserInner<M> {
             assert_eq!(self.ip, data.len());
 
             let last_block = flush == Flush::Finish;
-            bitstream::write_block(writer, data, base_index, &self.symbols, last_block)?;
+            bitstream::write_block(
+                writer,
+                &data[self.last_block_end..self.ip],
+                base_index + self.last_block_end as u32,
+                &self.symbols,
+                last_block,
+            )?;
             self.symbols.clear();
             self.last_block_end = self.ip;
         }

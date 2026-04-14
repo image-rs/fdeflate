@@ -116,6 +116,52 @@ pub(crate) fn write_block<W: Write>(
         7,
     );
 
+    // If the input is small, then check whether and uncompressed block would be
+    // cheaper.
+    if data.len() < 1024 {
+        let mut cost = 14 + 19 * 3;
+        for &length in lengths[..num_litlen_codes]
+            .iter()
+            .chain(&dist_lengths[..num_dist_codes])
+        {
+            cost += code_length_lengths[length as usize] as u32;
+        }
+
+        for symbol in symbols {
+            match symbol {
+                Symbol::LiteralRun { start, end } => {
+                    for &lit in &data[(*start - base_index) as usize..(*end - base_index) as usize]
+                    {
+                        cost += lengths[lit as usize] as u32;
+                    }
+                }
+                Symbol::Backref {
+                    length, dist_sym, ..
+                } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    cost += lengths[sym] as u32
+                        + LENGTH_TO_LEN_EXTRA[*length as usize - 3] as u32
+                        + dist_lengths[*dist_sym as usize] as u32
+                        + DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize] as u32;
+                }
+            }
+        }
+
+        if cost > 4 + data.len() as u32 {
+            if eof {
+                writer.write_bits(0b001, 3)?; // final block
+            } else {
+                writer.write_bits(0b000, 3)?; // non-final block
+            }
+
+            let writter_inner = writer.flush()?;
+            writter_inner.write_all(&(data.len() as u16).to_le_bytes())?;
+            writter_inner.write_all(&(!(data.len() as u16)).to_le_bytes())?;
+            writter_inner.write_all(&data)?;
+            return Ok(());
+        }
+    }
+
     if eof {
         writer.write_bits(0b101, 3)?; // final block
     } else {
