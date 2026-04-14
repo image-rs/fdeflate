@@ -200,7 +200,7 @@ impl<W: Write> Compressor<W> {
             self.input.written,
             match flush {
                 FlushKind::Partial => Flush::Partial,
-                FlushKind::Full => Flush::Finish,
+                FlushKind::Full => Flush::Full,
                 FlushKind::Sync => Flush::Sync,
             },
         )?;
