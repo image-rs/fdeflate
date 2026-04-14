@@ -209,7 +209,7 @@ impl<W: Write> Compressor<W> {
         if flush == FlushKind::Full {
             self.input.data.clear();
             self.input.written = 0;
-            self.inner.clear_matchfinder();
+            self.input.base_index = 0;
         } else {
             // Discard input data from before the start of the window, but avoid doing so too often.
             let discard = self.input.written.saturating_sub(self.window_size);
@@ -333,16 +333,6 @@ impl CompressorInner {
             CompressorInner::MediumFast(medium) => medium.reset_indices(old_base_index),
             CompressorInner::Medium(medium_high) => medium_high.reset_indices(old_base_index),
             CompressorInner::High(high) => high.reset_indices(old_base_index),
-        }
-    }
-
-    fn clear_matchfinder(&mut self) {
-        match self {
-            CompressorInner::Uncompressed | CompressorInner::Rle(_) => {}
-            CompressorInner::Fast(fast) => fast.clear_matchfinder(),
-            CompressorInner::MediumFast(medium) => medium.clear_matchfinder(),
-            CompressorInner::Medium(medium_high) => medium_high.clear_matchfinder(),
-            CompressorInner::High(high) => high.clear_matchfinder(),
         }
     }
 }

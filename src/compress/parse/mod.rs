@@ -43,10 +43,6 @@ impl<M: MatchFinder> ParserInner<M> {
         self.match_finder.reset_indices(old_base_index);
     }
 
-    fn clear_matchfinder(&mut self) {
-        self.match_finder.clear();
-    }
-
     fn start_compress(&mut self, data: &[u8], base_index: u32, start: usize) -> usize {
         assert!(base_index as u64 + data.len() as u64 <= u32::MAX as u64);
 
@@ -180,6 +176,17 @@ impl<M: MatchFinder> ParserInner<M> {
             self.last_block_end = self.ip;
         }
 
-        Ok(self.last_block_end - start)
+        let consumed = self.last_block_end - start;
+
+        if flush == Flush::Full {
+            self.match_finder.clear();
+            self.ip = 0;
+            self.last_match = 0;
+            self.last_index = 0;
+            self.last_block_end = 0;
+            assert!(self.symbols.is_empty());
+        }
+
+        Ok(consumed)
     }
 }
