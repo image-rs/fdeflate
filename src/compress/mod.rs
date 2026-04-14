@@ -25,6 +25,8 @@ const WINDOW_SIZE: usize = 32768;
 #[non_exhaustive]
 enum Flush {
     None,
+    Partial,
+    Full,
     Sync,
     Finish,
 }
@@ -41,6 +43,14 @@ impl InputStream {
         self.base_index += n as u32;
         self.written -= n;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FlushKind {
+    Partial,
+    Full,
+    Sync,
 }
 
 /// Compressor that produces zlib or raw deflate compressed streams.
@@ -157,16 +167,7 @@ impl<W: Write> Compressor<W> {
 
         // If the indices used by the compressor would overflow, reset the base index.
         if u64::from(self.input.base_index) + data.len() as u64 > u64::from(u32::MAX) {
-            match &mut self.inner {
-                CompressorInner::Uncompressed => {}
-                CompressorInner::Rle(rle) => rle.reset_indices(self.input.base_index),
-                CompressorInner::Fast(fast) => fast.reset_indices(self.input.base_index),
-                CompressorInner::MediumFast(medium) => medium.reset_indices(self.input.base_index),
-                CompressorInner::Medium(medium_high) => {
-                    medium_high.reset_indices(self.input.base_index)
-                }
-                CompressorInner::High(high) => high.reset_indices(self.input.base_index),
-            }
+            self.inner.reset_indices(self.input.base_index);
             self.input.base_index = 0;
         }
 
@@ -185,6 +186,41 @@ impl<W: Write> Compressor<W> {
         let discard = self.input.written.saturating_sub(self.window_size);
         if discard > 128 * 1024 {
             self.input.discard_bytes(discard);
+        }
+
+        Ok(())
+    }
+
+    /// Flush the compressor with the given flush kind.
+    pub fn flush(&mut self, flush: FlushKind) -> std::io::Result<()> {
+        let written = self.inner.compress(
+            &mut self.writer,
+            &self.input.data,
+            self.input.base_index,
+            self.input.written,
+            match flush {
+                FlushKind::Partial => Flush::Partial,
+                FlushKind::Full => Flush::Finish,
+                FlushKind::Sync => Flush::Sync,
+            },
+        )?;
+        self.input.written += written;
+
+        if flush == FlushKind::Sync {
+            self.input.data.clear();
+            self.input.written = 0;
+            if let Some(new_base_index) = self.input.base_index.checked_add(WINDOW_SIZE as u32) {
+                self.input.base_index = new_base_index;
+            } else {
+                self.inner.reset_indices(self.input.base_index);
+                self.input.base_index = WINDOW_SIZE as u32;
+            }
+        } else {
+            // Discard input data from before the start of the window, but avoid doing so too often.
+            let discard = self.input.written.saturating_sub(self.window_size);
+            if discard > 128 * 1024 {
+                self.input.discard_bytes(discard);
+            }
         }
 
         Ok(())
@@ -281,12 +317,26 @@ impl CompressorInner {
             }
         };
 
-        if flush == Flush::Sync {
+        if flush == Flush::Partial {
+            writer.write_bits(0b010, 10)?;
+            writer.partial_flush()?;
+        } else if flush == Flush::Full || flush == Flush::Sync {
             writer.write_bits(0, 3)?;
             writer.flush()?.write_all(&[0, 0, 0xff, 0xff])?;
         }
 
         Ok(written)
+    }
+
+    fn reset_indices(&mut self, old_base_index: u32) {
+        match self {
+            CompressorInner::Uncompressed => {}
+            CompressorInner::Rle(rle) => rle.reset_indices(old_base_index),
+            CompressorInner::Fast(fast) => fast.reset_indices(old_base_index),
+            CompressorInner::MediumFast(medium) => medium.reset_indices(old_base_index),
+            CompressorInner::Medium(medium_high) => medium_high.reset_indices(old_base_index),
+            CompressorInner::High(high) => high.reset_indices(old_base_index),
+        }
     }
 }
 
