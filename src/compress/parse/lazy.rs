@@ -27,6 +27,10 @@ impl LazyParser {
         self.inner.reset_indices(old_base_index);
     }
 
+    pub fn clear_matchfinder(&mut self) {
+        self.inner.clear_matchfinder();
+    }
+
     /// Compress the data using a greedy algorithm.
     pub fn compress<W: Write>(
         &mut self,

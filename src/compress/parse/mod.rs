@@ -43,6 +43,10 @@ impl<M: MatchFinder> ParserInner<M> {
         self.match_finder.reset_indices(old_base_index);
     }
 
+    fn clear_matchfinder(&mut self) {
+        self.match_finder.clear();
+    }
+
     fn start_compress(&mut self, data: &[u8], base_index: u32, start: usize) -> usize {
         assert!(base_index as u64 + data.len() as u64 <= u32::MAX as u64);
 
