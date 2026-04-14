@@ -206,7 +206,7 @@ impl<W: Write> Compressor<W> {
         )?;
         self.input.written += written;
 
-        if flush == FlushKind::Sync {
+        if flush == FlushKind::Full {
             self.input.data.clear();
             self.input.written = 0;
             if let Some(new_base_index) = self.input.base_index.checked_add(WINDOW_SIZE as u32) {
