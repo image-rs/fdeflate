@@ -322,7 +322,9 @@ impl CompressorInner {
             writer.partial_flush()?;
         } else if flush == Flush::Full || flush == Flush::Sync {
             writer.write_bits(0, 3)?;
-            writer.flush()?.write_all(&[0, 0, 0xff, 0xff])?;
+            let inner_writter = writer.flush()?;
+            inner_writter.write_all(&[0, 0, 0xff, 0xff])?;
+            inner_writter.flush()?;
         }
 
         Ok(written)

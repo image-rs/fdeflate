@@ -30,16 +30,17 @@ impl<W: Write> BitWriter<W> {
         Ok(())
     }
 
-    /// Flush buffered full bytes to the underlying writer, but leave any partial bytes in the buffer.
+    /// Flush buffered full bytes to the underlying writer, and then flush the
+    /// underlying writer. Any partial bytes in the buffer are left there.
     pub fn partial_flush(&mut self) -> io::Result<()> {
-        if self.nbits < 8 {
-            return Ok(());
+        if self.nbits >= 8 {
+            self.writer
+                .write_all(&self.buffer.to_le_bytes()[..self.nbits as usize / 8])?;
+            self.buffer >>= (self.nbits / 8) * 8;
+            self.nbits %= 8;
         }
 
-        self.writer
-            .write_all(&self.buffer.to_le_bytes()[..self.nbits as usize / 8])?;
-        self.buffer >>= (self.nbits / 8) * 8;
-        self.nbits %= 8;
+        self.writer.flush()?;
 
         Ok(())
     }
