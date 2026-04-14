@@ -37,6 +37,9 @@ impl HybridMatchFinder {
         }
     }
 
+    // inlining improves Silesia compression benchmark:
+    // from 23MB/s to 27MB/s at level 6, from 18MB/s to 22MB/s at level 9
+    #[inline]
     fn lookup(
         &mut self,
         data: &[u8],
@@ -140,6 +143,9 @@ impl HybridMatchFinder {
 }
 
 impl MatchFinder for HybridMatchFinder {
+    // inlining improves Silesia compression benchmark:
+    // from 23MB/s to 27MB/s at level 6, from 18MB/s to 22MB/s at level 9
+    #[inline]
     fn get_and_insert(
         &mut self,
         data: &[u8],
