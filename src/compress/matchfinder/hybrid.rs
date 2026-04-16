@@ -37,6 +37,7 @@ impl HybridMatchFinder {
         }
     }
 
+    #[inline] // benchmarks indicated this is beneficial, see #74
     fn lookup(
         &mut self,
         data: &[u8],
@@ -140,6 +141,7 @@ impl HybridMatchFinder {
 }
 
 impl MatchFinder for HybridMatchFinder {
+    #[inline] // benchmarks indicated this is beneficial, see #74
     fn get_and_insert(
         &mut self,
         data: &[u8],
