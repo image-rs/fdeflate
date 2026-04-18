@@ -1148,7 +1148,7 @@ mod tests {
     use crate::tables::{LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL};
 
     use super::*;
-    use rand::Rng;
+    use rand::RngExt;
 
     fn roundtrip(data: &[u8]) {
         let compressed = crate::compress_to_vec(data);
@@ -1247,11 +1247,11 @@ mod tests {
 
     #[test]
     fn random() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut data = vec![0; 50000];
         for _ in 0..10 {
             for byte in &mut data {
-                *byte = rng.gen::<u8>() % 5;
+                *byte = rng.random::<u8>() % 5;
             }
             println!("Random data: {:?}", data);
             roundtrip_miniz_oxide(&data);

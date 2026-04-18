@@ -184,7 +184,7 @@ impl<W: Write> UltraFastCompressor<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
+    use rand::RngExt;
 
     fn compress_to_vec_ultrafast(input: &[u8]) -> Vec<u8> {
         let mut compressor = UltraFastCompressor::new(Vec::with_capacity(input.len() / 4)).unwrap();
@@ -213,11 +213,11 @@ mod tests {
 
     #[test]
     fn random() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut data = vec![0; 2048];
         for _ in 0..10 {
             for byte in &mut data {
-                *byte = rng.gen();
+                *byte = rng.random();
             }
             roundtrip(&data);
         }
