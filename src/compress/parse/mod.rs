@@ -176,6 +176,17 @@ impl<M: MatchFinder> ParserInner<M> {
             self.last_block_end = self.ip;
         }
 
-        Ok(self.last_block_end - start)
+        let consumed = self.last_block_end - start;
+
+        if flush == Flush::Full {
+            self.match_finder.clear();
+            self.ip = 0;
+            self.last_match = 0;
+            self.last_index = 0;
+            self.last_block_end = 0;
+            assert!(self.symbols.is_empty());
+        }
+
+        Ok(consumed)
     }
 }

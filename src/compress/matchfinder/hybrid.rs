@@ -175,4 +175,9 @@ impl MatchFinder for HybridMatchFinder {
             *v = v.saturating_sub(old_base_index);
         }
     }
+
+    fn clear(&mut self) {
+        self.hash4_table.fill(0);
+        self.hash_table.fill(0);
+    }
 }

@@ -60,4 +60,8 @@ impl MatchFinder for HashTableMatchFinder {
             *v = v.saturating_sub(old_base_index);
         }
     }
+
+    fn clear(&mut self) {
+        self.hash_table.fill(0);
+    }
 }

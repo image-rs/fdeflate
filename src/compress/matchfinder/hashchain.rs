@@ -122,4 +122,8 @@ impl<const MIN_MATCH8: bool> MatchFinder for HashChainMatchFinder<MIN_MATCH8> {
             *v = v.saturating_sub(old_base_index);
         }
     }
+
+    fn clear(&mut self) {
+        self.hash_table.fill(0);
+    }
 }

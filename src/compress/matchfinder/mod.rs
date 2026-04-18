@@ -157,6 +157,8 @@ pub(crate) trait MatchFinder {
     fn insert(&mut self, value: u64, offset: u32);
 
     fn reset_indices(&mut self, old_base_index: u32);
+
+    fn clear(&mut self);
 }
 
 pub(crate) struct NullMatchFinder;
@@ -173,4 +175,5 @@ impl MatchFinder for NullMatchFinder {
     }
     fn insert(&mut self, _value: u64, _offset: u32) {}
     fn reset_indices(&mut self, _old_base_index: u32) {}
+    fn clear(&mut self) {}
 }
