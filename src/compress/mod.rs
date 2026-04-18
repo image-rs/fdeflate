@@ -45,12 +45,17 @@ impl InputStream {
     }
 }
 
+/// The supported flush kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FlushKind {
+    /// Finish compressing pending data and output an empty fixed block.
     Partial,
-    Full,
+    /// Finish compressing pending data and output an empty stored block.
     Sync,
+    /// Same as [`FlushKind::Sync`], but also resets the compression dictionary so subsequent output
+    /// doesn't depend on previous output.
+    Full,
 }
 
 /// Compressor that produces zlib or raw deflate compressed streams.
