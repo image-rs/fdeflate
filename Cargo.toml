@@ -23,7 +23,7 @@ simd-adler32 = "0.3.4"
 
 [dev-dependencies]
 miniz_oxide = "0.8.9"
-rand = "0.8.5"
+rand = "0.10.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(fuzzing)'] }
