@@ -167,7 +167,7 @@ pub(crate) fn write_block<W: Write>(
             let writter_inner = writer.flush()?;
             writter_inner.write_all(&(data.len() as u16).to_le_bytes())?;
             writter_inner.write_all(&(!(data.len() as u16)).to_le_bytes())?;
-            writter_inner.write_all(&data)?;
+            writter_inner.write_all(data)?;
             return Ok(());
         } else if fixed_cost < dynamic_cost {
             use_fixed_block = true;
