@@ -161,6 +161,11 @@ impl Decompressor {
     /// or an error if the deflate stream is not valid. `input` is the compressed data. `output` is
     /// the buffer to write the decompressed data to, starting at index `output_position`.
     ///
+    /// The bytes in `output` prior to `output_position` are used for decoding backreferences.
+    /// During the first call to read, `output_position` should be set to zero and on subsequent
+    /// calls `output` should include at least the last 32768 bytes of output in order to decode
+    /// backreferences.
+    ///
     /// The contents of `output` after `output_position` are ignored. However, this function may
     /// write additional data to `output` past what is indicated by the return value.
     ///
@@ -170,8 +175,8 @@ impl Decompressor {
     /// - The deflate stream is complete (and `is_done` will return true).
     ///
     /// To detect whether the zlib stream was truncated before the final checksum, call the
-    /// `is_done` method after all input data has been consumed and no more data is written. If it returns false, then the
-    /// stream was truncated.
+    /// `is_done` method after all input data has been consumed and no more data is written. If it
+    /// returns false, then the stream was truncated.
     ///
     /// # Panics
     ///
