@@ -226,6 +226,19 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
+    /// Gets a shared reference to the underlying writer.
+    pub fn get_ref(&self) -> &W {
+        self.writer.get_ref()
+    }
+
+    /// Gets a mutable reference to the underlying writer.
+    ///
+    /// Any partially buffered bits stay inside the compressor, so this exposes only bytes that
+    /// have already been emitted to the wrapped writer.
+    pub fn get_mut(&mut self) -> &mut W {
+        self.writer.get_mut()
+    }
+
     /// Write the remainder of the stream and return the inner writer.
     pub fn finish(mut self) -> std::io::Result<W> {
         let written = self.inner.compress(
