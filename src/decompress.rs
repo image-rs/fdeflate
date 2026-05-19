@@ -47,6 +47,16 @@ pub enum DecompressionError {
     ExtraInput,
 }
 
+/// The wrapper format around the deflate stream.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Format {
+    /// A zlib stream: two-byte zlib header, deflate blocks, and Adler-32 trailer.
+    Zlib,
+    /// A raw deflate stream with no zlib header or Adler-32 trailer.
+    Raw,
+}
+
 struct BlockHeader {
     hlit: usize,
     hdist: usize,
@@ -56,6 +66,18 @@ struct BlockHeader {
     /// Low 3-bits are code length code length, high 5-bits are code length code.
     table: [u32; 128],
     code_lengths: [u8; 320],
+}
+impl BlockHeader {
+    fn new() -> Self {
+        Self {
+            hlit: 0,
+            hdist: 0,
+            hclen: 0,
+            table: [0; 128],
+            num_lengths_read: 0,
+            code_lengths: [0; 320],
+        }
+    }
 }
 
 pub const LITERAL_ENTRY: u32 = 0x8000;
@@ -79,6 +101,29 @@ struct CompressedBlock<const LITLEN_TABLE_SIZE: usize, const DIST_TABLE_SIZE: us
     eof_mask: u16,
     eof_bits: u8,
 }
+impl<const LITLEN_TABLE_SIZE: usize, const DIST_TABLE_SIZE: usize>
+    CompressedBlock<LITLEN_TABLE_SIZE, DIST_TABLE_SIZE>
+{
+    fn new() -> Self {
+        Self {
+            litlen_table: Box::new([0; LITLEN_TABLE_SIZE]),
+            dist_table: Box::new([0; DIST_TABLE_SIZE]),
+            secondary_table: Vec::new(),
+            dist_secondary_table: Vec::new(),
+            eof_code: 0,
+            eof_mask: 0,
+            eof_bits: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.secondary_table.clear();
+        self.dist_secondary_table.clear();
+        self.eof_code = 0;
+        self.eof_mask = 0;
+        self.eof_bits = 0;
+    }
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum State {
@@ -92,7 +137,7 @@ enum State {
     Done,
 }
 
-/// Decompressor for arbitrary zlib streams.
+/// Decompressor for arbitrary zlib or raw deflate streams.
 pub struct Decompressor {
     /// State for decoding a compressed block.
     compression: CompressedBlock<DEFAULT_LITLEN_TABLE_SIZE, DEFAULT_DIST_TABLE_SIZE>,
@@ -108,6 +153,7 @@ pub struct Decompressor {
     fixed_table: bool,
 
     state: State,
+    format: Format,
     checksum: Adler32,
     ignore_adler32: bool,
 }
@@ -119,34 +165,57 @@ impl Default for Decompressor {
 }
 
 impl Decompressor {
-    /// Create a new decompressor.
+    /// Create a new decompressor for a zlib stream.
     pub fn new() -> Self {
+        Self::new_with_format(Format::Zlib)
+    }
+
+    /// Create a new decompressor for the given wrapper format.
+    pub fn new_with_format(format: Format) -> Self {
         Self {
             bits: BitBuffer::new(),
-            compression: CompressedBlock {
-                litlen_table: Box::new([0; DEFAULT_LITLEN_TABLE_SIZE]),
-                dist_table: Box::new([0; DEFAULT_DIST_TABLE_SIZE]),
-                secondary_table: Vec::new(),
-                dist_secondary_table: Vec::new(),
-                eof_code: 0,
-                eof_mask: 0,
-                eof_bits: 0,
-            },
-            header: BlockHeader {
-                hlit: 0,
-                hdist: 0,
-                hclen: 0,
-                table: [0; 128],
-                num_lengths_read: 0,
-                code_lengths: [0; 320],
-            },
+            compression: CompressedBlock::new(),
+            header: BlockHeader::new(),
             uncompressed_bytes_left: 0,
             queued_output: None,
             checksum: Adler32::new(),
-            state: State::ZlibHeader,
+            state: Self::initial_state(format),
+            format,
             last_block: false,
             ignore_adler32: false,
             fixed_table: false,
+        }
+    }
+
+    /// Reset this decompressor for the given wrapper format.
+    ///
+    /// The large Huffman tables are reused across resets so callers can switch between raw and
+    /// zlib streams without reallocating the decompressor's working storage.
+    pub fn reset(&mut self, format: Format) {
+        self.bits = BitBuffer::new();
+        self.compression.reset();
+        self.header = BlockHeader::new();
+        self.uncompressed_bytes_left = 0;
+        self.queued_output = None;
+        self.checksum = Adler32::new();
+        self.state = Self::initial_state(format);
+        self.format = format;
+        self.last_block = false;
+        self.ignore_adler32 = false;
+        self.fixed_table = false;
+    }
+
+    fn initial_state(format: Format) -> State {
+        match format {
+            Format::Zlib => State::ZlibHeader,
+            Format::Raw => State::BlockHeader,
+        }
+    }
+
+    fn final_block_state(&self) -> State {
+        match self.format {
+            Format::Zlib => State::Checksum,
+            Format::Raw => State::Done,
         }
     }
 
@@ -268,7 +337,7 @@ impl Decompressor {
                     output_index = new_output_index;
                     if compresed_block_status == CompressedBlockStatus::ReachedEndOfBlock {
                         self.state = match self.last_block {
-                            true => State::Checksum,
+                            true => self.final_block_state(),
                             false => State::BlockHeader,
                         };
                     }
@@ -302,7 +371,7 @@ impl Decompressor {
 
                     if self.uncompressed_bytes_left == 0 {
                         self.state = if self.last_block {
-                            State::Checksum
+                            self.final_block_state()
                         } else {
                             State::BlockHeader
                         };
@@ -329,16 +398,24 @@ impl Decompressor {
                         break;
                     }
                 }
-                State::Done => unreachable!(),
+                State::Done => break,
             }
         }
 
-        if !self.ignore_adler32 && self.state != State::Done {
+        if self.format == Format::Zlib && !self.ignore_adler32 && self.state != State::Done {
             self.checksum.write(&output[output_position..output_index]);
         }
 
-        let input_left = remaining_input.len();
-        Ok((input.len() - input_left, output_index - output_position))
+        let mut consumed = input.len() - remaining_input.len();
+        if self.state == State::Done {
+            // `fill_buffer` may have pulled whole bytes that belong to the next wrapper layer
+            // (gzip footer, concatenated stream, or caller-owned trailing data). Partial bits are
+            // deflate/zlib padding and stay counted as consumed, but whole buffered bytes are
+            // reported back as unread so the caller can process them.
+            consumed = consumed.saturating_sub(self.bits.nbits as usize / 8);
+        }
+
+        Ok((consumed, output_index - output_position))
     }
 
     /// Returns true if the decompressor has finished decompressing the input.
@@ -382,7 +459,7 @@ impl Decompressor {
                 if self.bits.peek_bits(7) == 0 {
                     self.bits.consume_bits(7);
                     if self.last_block {
-                        self.state = State::Checksum;
+                        self.state = self.final_block_state();
                         return Ok(());
                     }
 
@@ -1327,6 +1404,117 @@ mod tests {
         assert!(decompressor.is_done());
         assert_eq!(input_consumed, compressed.len());
         assert_eq!(output_written, 0);
+    }
+
+    fn compress_raw(input: &[u8]) -> Vec<u8> {
+        let mut compressor = crate::Compressor::new(Vec::new(), 3, false).unwrap();
+        compressor.write_data(input).unwrap();
+        compressor.finish().unwrap()
+    }
+
+    #[test]
+    fn raw_roundtrip() {
+        let input = b"raw deflate data with data data data";
+        let compressed = compress_raw(input);
+        let mut decompressor = Decompressor::new_with_format(Format::Raw);
+        let mut output = vec![0; 1024];
+
+        let (input_consumed, output_written) =
+            decompressor.read(&compressed, &mut output, 0).unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, compressed.len());
+        assert_eq!(&output[..output_written], input);
+    }
+
+    #[test]
+    fn reset_between_formats() {
+        let zlib_input = b"zlib stream";
+        let raw_input = b"raw stream";
+        let zlib = crate::compress_to_vec(zlib_input);
+        let raw = compress_raw(raw_input);
+
+        let mut decompressor = Decompressor::new_with_format(Format::Raw);
+        let mut output = vec![0; 1024];
+        let (_, output_written) = decompressor.read(&raw, &mut output, 0).unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(&output[..output_written], raw_input);
+
+        decompressor.reset(Format::Zlib);
+        let (input_consumed, output_written) = decompressor.read(&zlib, &mut output, 0).unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, zlib.len());
+        assert_eq!(&output[..output_written], zlib_input);
+    }
+
+    #[test]
+    fn raw_trailing_bytes_are_not_consumed() {
+        let input = b"raw stream with trailing bytes";
+        let compressed = compress_raw(input);
+        let mut with_trailing = compressed.clone();
+        with_trailing.extend_from_slice(b"trailing");
+
+        let mut decompressor = Decompressor::new_with_format(Format::Raw);
+        let mut output = vec![0; 1024];
+        let (input_consumed, output_written) =
+            decompressor.read(&with_trailing, &mut output, 0).unwrap();
+
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, compressed.len());
+        assert_eq!(&with_trailing[input_consumed..], b"trailing");
+        assert_eq!(&output[..output_written], input);
+    }
+
+    #[test]
+    fn zlib_trailing_bytes_are_not_consumed() {
+        let input = b"zlib stream with trailing bytes";
+        let compressed = crate::compress_to_vec(input);
+        let mut with_trailing = compressed.clone();
+        with_trailing.extend_from_slice(b"trailing");
+
+        let mut decompressor = Decompressor::new();
+        let mut output = vec![0; 1024];
+        let (input_consumed, output_written) =
+            decompressor.read(&with_trailing, &mut output, 0).unwrap();
+
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, compressed.len());
+        assert_eq!(&with_trailing[input_consumed..], b"trailing");
+        assert_eq!(&output[..output_written], input);
+    }
+
+    #[test]
+    fn raw_chunked_input_and_partial_output() {
+        let input = vec![b'a'; 96 * 1024];
+        let compressed = compress_raw(&input);
+        let mut decompressor = Decompressor::new_with_format(Format::Raw);
+        let mut output = vec![0; input.len() + 64];
+        let mut input_index = 0;
+        let mut output_index = 0;
+        let mut iterations = 0;
+
+        while !decompressor.is_done() {
+            iterations += 1;
+            assert!(iterations < 100_000, "decompressor did not finish");
+            let input_end = (input_index + 3).min(compressed.len());
+            let output_end = (output_index + 17).min(output.len());
+            let (input_consumed, output_written) = decompressor
+                .read(
+                    &compressed[input_index..input_end],
+                    &mut output[..output_end],
+                    output_index,
+                )
+                .unwrap();
+            input_index += input_consumed;
+            output_index += output_written;
+            assert!(
+                input_consumed != 0 || output_written != 0 || input_index == compressed.len(),
+                "decompressor made no progress"
+            );
+        }
+
+        assert_eq!(input_index, compressed.len());
+        assert_eq!(output_index, input.len());
+        assert_eq!(&output[..output_index], input);
     }
 
     mod test_utils;
