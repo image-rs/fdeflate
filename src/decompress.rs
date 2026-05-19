@@ -562,16 +562,19 @@ impl Decompressor {
         let total_lengths = self.header.hlit + self.header.hdist;
         while self.header.num_lengths_read < total_lengths {
             self.bits.fill_buffer(remaining_input);
-            if self.bits.nbits < 7 {
+            if self.bits.nbits == 0 {
                 return Ok(());
             }
 
-            let code = self.bits.peek_bits(7);
+            let code = self.bits.peek_bits(self.bits.nbits.min(7));
             let entry = self.header.table[code as usize];
             let length = (entry & 0x7) as u8;
             let symbol = (entry >> 16) as u8;
 
-            debug_assert!(length != 0);
+            if length == 0 || self.bits.nbits < length {
+                return Ok(());
+            }
+
             match symbol {
                 0..=15 => {
                     self.header.code_lengths[self.header.num_lengths_read] = symbol;
@@ -1421,6 +1424,23 @@ mod tests {
 
         let (input_consumed, output_written) =
             decompressor.read(&compressed, &mut output, 0).unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, compressed.len());
+        assert_eq!(&output[..output_written], input);
+    }
+
+    #[test]
+    fn raw_single_zero_roundtrip() {
+        let input = [0];
+        let compressed = compress_raw(&input);
+        let decompressed = miniz_oxide::inflate::decompress_to_vec(&compressed).unwrap();
+        assert_eq!(decompressed, input);
+
+        let mut decompressor = Decompressor::new_with_format(Format::Raw);
+        let mut output = vec![0; 1024];
+        let (input_consumed, output_written) =
+            decompressor.read(&compressed, &mut output, 0).unwrap();
+
         assert!(decompressor.is_done());
         assert_eq!(input_consumed, compressed.len());
         assert_eq!(&output[..output_written], input);
