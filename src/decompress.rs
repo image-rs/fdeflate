@@ -262,6 +262,8 @@ impl Decompressor {
 
         assert!(output_position <= output.len());
 
+        self.bits.mark_committed();
+
         let mut remaining_input = input;
         let mut output_index = output_position;
 
@@ -407,12 +409,15 @@ impl Decompressor {
         }
 
         let mut consumed = input.len() - remaining_input.len();
-        if self.state == State::Done {
-            // `fill_buffer` may have pulled whole bytes that belong to the next wrapper layer
-            // (gzip footer, concatenated stream, or caller-owned trailing data). Partial bits are
-            // deflate/zlib padding and stay counted as consumed, but whole buffered bytes are
-            // reported back as unread so the caller can process them.
-            consumed = consumed.saturating_sub(self.bits.nbits as usize / 8);
+        if self.state == State::Done || output_index == output.len() {
+            // `fill_buffer` may have pulled whole bytes that were not needed before this return
+            // boundary. Keep already-committed bits and any partially consumed byte, but report
+            // uncommitted whole bytes as unread so the caller can process them later.
+            let unread_bytes = self.bits.rewind_uncommitted_whole_bytes();
+            debug_assert!(consumed >= unread_bytes);
+            consumed -= unread_bytes;
+        } else {
+            self.bits.mark_committed();
         }
 
         Ok((consumed, output_index - output_position))
@@ -1107,6 +1112,7 @@ impl<const LITLEN_TABLE_SIZE: usize, const DIST_TABLE_SIZE: usize>
 struct BitBuffer {
     buffer: u64,
     nbits: u8,
+    committed_bits: u8,
 }
 
 impl BitBuffer {
@@ -1114,7 +1120,39 @@ impl BitBuffer {
         Self {
             buffer: 0,
             nbits: 0,
+            committed_bits: 0,
         }
+    }
+
+    /// Mark the currently buffered bits as already reported in a previous consumed count.
+    ///
+    /// Later calls to `rewind_uncommitted_whole_bytes` will preserve these bits so we do not
+    /// subtract bytes that the caller has already been told were consumed.
+    #[inline]
+    fn mark_committed(&mut self) {
+        self.committed_bits = self.nbits;
+    }
+
+    /// Return whole bytes read into the bit buffer during this `read` call back to the caller.
+    ///
+    /// This should only be used at return boundaries where the decoder does not need more input to
+    /// make progress, such as when the output buffer is full or the stream is complete. On
+    /// input-starved returns, buffered bytes must stay committed so later calls can combine them
+    /// with new input for multi-byte headers, Huffman lookups, and checksum parsing.
+    #[inline]
+    fn rewind_uncommitted_whole_bytes(&mut self) -> usize {
+        debug_assert!(self.committed_bits <= self.nbits);
+
+        let uncommitted_bits = self.nbits - self.committed_bits;
+        let unread_bytes = uncommitted_bits / 8;
+        if unread_bytes != 0 {
+            let keep_bits = self.nbits - unread_bytes * 8;
+            self.buffer &= (1u64 << keep_bits).wrapping_sub(1);
+            self.nbits = keep_bits;
+        }
+
+        self.mark_committed();
+        unread_bytes as usize
     }
 
     fn fill_buffer(&mut self, input: &mut &[u8]) {
@@ -1145,6 +1183,7 @@ impl BitBuffer {
         debug_assert!(self.nbits >= nbits);
         self.buffer >>= nbits;
         self.nbits -= nbits;
+        self.committed_bits = self.committed_bits.saturating_sub(nbits);
     }
 }
 
