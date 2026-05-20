@@ -276,6 +276,7 @@ impl Decompressor {
                     output_index += n;
                     if let Ok(length) = NonZeroUsize::try_from(length - n) {
                         self.queued_output = Some(QueuedOutput::Rle { data, length });
+                        self.update_checksum(output, output_position, output_index);
                         return Ok((0, n));
                     }
                 }
@@ -288,6 +289,7 @@ impl Decompressor {
                     output_index += n;
                     if let Ok(length) = NonZeroUsize::try_from(length - n) {
                         self.queued_output = Some(QueuedOutput::Backref { dist, length });
+                        self.update_checksum(output, output_position, output_index);
                         return Ok((0, n));
                     }
                 }
@@ -404,9 +406,7 @@ impl Decompressor {
             }
         }
 
-        if self.format == Format::Zlib && !self.ignore_adler32 && self.state != State::Done {
-            self.checksum.write(&output[output_position..output_index]);
-        }
+        self.update_checksum(output, output_position, output_index);
 
         let mut consumed = input.len() - remaining_input.len();
         if self.state == State::Done || output_index == output.len() {
@@ -426,6 +426,12 @@ impl Decompressor {
     /// Returns true if the decompressor has finished decompressing the input.
     pub fn is_done(&self) -> bool {
         self.state == State::Done
+    }
+
+    fn update_checksum(&mut self, output: &[u8], start: usize, end: usize) {
+        if self.format == Format::Zlib && !self.ignore_adler32 && self.state != State::Done {
+            self.checksum.write(&output[start..end]);
+        }
     }
 
     fn read_block_header(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
