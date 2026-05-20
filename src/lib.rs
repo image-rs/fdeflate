@@ -32,7 +32,7 @@ pub use compress::{
 };
 pub use decompress::{
     decompress_to_vec, decompress_to_vec_bounded, BoundedDecompressionError, DecompressionError,
-    Decompressor,
+    Decompressor, Format,
 };
 
 /// Build a length limited huffman tree.
