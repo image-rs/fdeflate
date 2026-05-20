@@ -182,7 +182,7 @@ impl Decompressor {
             state: Self::initial_state(format),
             format,
             last_block: false,
-            ignore_adler32: false,
+            ignore_adler32: format == Format::Raw,
             fixed_table: false,
         }
     }
@@ -201,7 +201,7 @@ impl Decompressor {
         self.state = Self::initial_state(format);
         self.format = format;
         self.last_block = false;
-        self.ignore_adler32 = false;
+        self.ignore_adler32 = format == Format::Raw;
         self.fixed_table = false;
     }
 
@@ -566,12 +566,12 @@ impl Decompressor {
                 return Ok(());
             }
 
-            let code = self.bits.peek_bits(self.bits.nbits.min(7));
-            let entry = self.header.table[code as usize];
+            let entry = self.header.table[(self.bits.buffer & 0x7f) as usize];
             let length = (entry & 0x7) as u8;
             let symbol = (entry >> 16) as u8;
 
-            if length == 0 || self.bits.nbits < length {
+            debug_assert!(length != 0);
+            if self.bits.nbits < length {
                 return Ok(());
             }
 
