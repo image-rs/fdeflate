@@ -1502,6 +1502,67 @@ mod tests {
         assert_eq!(&output[..output_written], input);
     }
 
+    fn trailing_bytes_are_not_consumed_with_tiny_output(
+        format: Format,
+        compressed: &[u8],
+        input: &[u8],
+    ) {
+        let mut with_trailing = compressed.to_vec();
+        with_trailing.extend_from_slice(b"trailing");
+
+        let mut decompressor = Decompressor::new_with_format(format);
+        let mut output = vec![0; input.len() + 64];
+        let mut input_index = 0;
+        let mut output_index = 0;
+        let mut iterations = 0;
+
+        while !decompressor.is_done() {
+            iterations += 1;
+            assert!(iterations < 1_000_000, "decompressor did not finish");
+
+            let output_end = (output_index + 1).min(output.len());
+            let (input_consumed, output_written) = decompressor
+                .read(
+                    &with_trailing[input_index..],
+                    &mut output[..output_end],
+                    output_index,
+                )
+                .unwrap();
+            input_index += input_consumed;
+            output_index += output_written;
+
+            assert!(
+                input_index <= compressed.len(),
+                "decompressor consumed {} trailing bytes before stream end",
+                input_index - compressed.len()
+            );
+            assert!(
+                input_consumed != 0 || output_written != 0,
+                "decompressor made no progress"
+            );
+        }
+
+        assert_eq!(input_index, compressed.len());
+        assert_eq!(&with_trailing[input_index..], b"trailing");
+        assert_eq!(&output[..output_index], input);
+    }
+
+    #[test]
+    fn raw_trailing_bytes_are_not_consumed_with_tiny_output() {
+        let input = vec![b'a'; 128 * 1024];
+        let compressed = compress_raw(&input);
+
+        trailing_bytes_are_not_consumed_with_tiny_output(Format::Raw, &compressed, &input);
+    }
+
+    #[test]
+    fn zlib_trailing_bytes_are_not_consumed_with_tiny_output() {
+        let input = vec![b'a'; 128 * 1024];
+        let compressed = crate::compress_to_vec(&input);
+
+        trailing_bytes_are_not_consumed_with_tiny_output(Format::Zlib, &compressed, &input);
+    }
+
     #[test]
     fn raw_chunked_input_and_partial_output() {
         let input = vec![b'a'; 96 * 1024];
