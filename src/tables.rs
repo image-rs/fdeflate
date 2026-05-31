@@ -201,10 +201,7 @@ pub(crate) const FIXED_DIST_TABLE: [u32; 32] = [
     201427461, 12682757, 5,
 ];
 
-#[cfg(test)]
 pub(crate) const FIXED_CODE_LENGTHS: [u8; 320] = make_fixed_code_lengths();
-
-#[cfg(test)]
 const fn make_fixed_code_lengths() -> [u8; 320] {
     let mut i = 0;
     let mut lengths = [0; 320];
@@ -229,4 +226,40 @@ const fn make_fixed_code_lengths() -> [u8; 320] {
         i += 1;
     }
     lengths
+}
+
+pub(crate) const FIXED_LITLEN_CODES: [u16; 286] = make_fixed_litlen_codes();
+const fn make_fixed_litlen_codes() -> [u16; 286] {
+    let mut codes = [0; 286];
+
+    let mut i = 0;
+    while i <= 143 {
+        codes[i] = (0b00110000 + i as u16).reverse_bits() >> 8;
+        i += 1;
+    }
+    while i <= 255 {
+        codes[i] = (0b110010000 + (i - 144) as u16).reverse_bits() >> 7;
+        i += 1;
+    }
+    while i <= 279 {
+        codes[i] = ((i - 256) as u16).reverse_bits() >> 9;
+        i += 1;
+    }
+    while i <= 285 {
+        codes[i] = (0b11000000 + (i - 280) as u16).reverse_bits() >> 8;
+        i += 1;
+    }
+    codes
+}
+
+pub(crate) const FIXED_DIST_CODES: [u16; 30] = make_fixed_dist_codes();
+const fn make_fixed_dist_codes() -> [u16; 30] {
+    let mut codes = [0; 30];
+
+    let mut i = 0;
+    while i < 30 {
+        codes[i] = (i as u16).reverse_bits() >> 11;
+        i += 1;
+    }
+    codes
 }

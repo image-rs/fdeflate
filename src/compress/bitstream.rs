@@ -8,8 +8,8 @@ use std::{
 use crate::{
     compress::BitWriter,
     tables::{
-        BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_LEN_EXTRA,
-        LENGTH_TO_SYMBOL,
+        BITMASKS, CLCL_ORDER, DIST_SYM_TO_DIST_BASE, DIST_SYM_TO_DIST_EXTRA, FIXED_CODE_LENGTHS,
+        FIXED_DIST_CODES, FIXED_LITLEN_CODES, LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL,
     },
 };
 
@@ -116,28 +116,99 @@ pub(crate) fn write_block<W: Write>(
         7,
     );
 
-    if eof {
-        writer.write_bits(0b101, 3)?; // final block
+    // If the input is small, then check whether an uncompressed block or a
+    // fixed code block would be cheaper.
+    let mut use_fixed_block = false;
+    if data.len() < 1024 {
+        let stored_cost = (4 + data.len() as u32) * 8;
+        let mut dynamic_cost = 14 + 19 * 3;
+        let mut fixed_cost = 0;
+
+        for &length in lengths[..num_litlen_codes]
+            .iter()
+            .chain(&dist_lengths[..num_dist_codes])
+        {
+            dynamic_cost += code_length_lengths[length as usize] as u32;
+        }
+
+        for symbol in symbols {
+            match symbol {
+                Symbol::LiteralRun { start, end } => {
+                    for &lit in &data[(*start - base_index) as usize..(*end - base_index) as usize]
+                    {
+                        dynamic_cost += lengths[lit as usize] as u32;
+                        fixed_cost += FIXED_CODE_LENGTHS[lit as usize] as u32;
+                    }
+                }
+                Symbol::Backref {
+                    length, dist_sym, ..
+                } => {
+                    let sym = LENGTH_TO_SYMBOL[*length as usize - 3] as usize;
+                    let extra_bits = LENGTH_TO_LEN_EXTRA[*length as usize - 3] as u32
+                        + DIST_SYM_TO_DIST_EXTRA[*dist_sym as usize] as u32;
+
+                    dynamic_cost +=
+                        lengths[sym] as u32 + dist_lengths[*dist_sym as usize] as u32 + extra_bits;
+                    fixed_cost += FIXED_CODE_LENGTHS[sym] as u32 + 5 + extra_bits;
+                }
+            }
+        }
+
+        dynamic_cost += lengths[256] as u32;
+        fixed_cost += FIXED_CODE_LENGTHS[256] as u32;
+
+        if stored_cost < dynamic_cost && stored_cost < fixed_cost {
+            if eof {
+                writer.write_bits(1, 3)?;
+            } else {
+                writer.write_bits(0, 3)?;
+            }
+
+            let writter_inner = writer.flush()?;
+            writter_inner.write_all(&(data.len() as u16).to_le_bytes())?;
+            writter_inner.write_all(&(!(data.len() as u16)).to_le_bytes())?;
+            writter_inner.write_all(data)?;
+            return Ok(());
+        } else if fixed_cost < dynamic_cost {
+            use_fixed_block = true;
+        }
+    }
+
+    if use_fixed_block {
+        if eof {
+            writer.write_bits(0b11, 3)?;
+        } else {
+            writer.write_bits(0b10, 3)?;
+        }
+
+        lengths.copy_from_slice(&FIXED_CODE_LENGTHS[..286]);
+        codes.copy_from_slice(&FIXED_LITLEN_CODES);
+        dist_lengths.fill(5);
+        dist_codes.copy_from_slice(&FIXED_DIST_CODES);
     } else {
-        writer.write_bits(0b100, 3)?; // non-final block
-    }
+        if eof {
+            writer.write_bits(0b101, 3)?; // final block
+        } else {
+            writer.write_bits(0b100, 3)?; // non-final block
+        }
 
-    writer.write_bits(num_litlen_codes as u64 - 257, 5)?; // hlit
-    writer.write_bits(num_dist_codes as u64 - 1, 5)?; // hdist
-    writer.write_bits(15, 4)?; // hclen
+        writer.write_bits(num_litlen_codes as u64 - 257, 5)?; // hlit
+        writer.write_bits(num_dist_codes as u64 - 1, 5)?; // hdist
+        writer.write_bits(15, 4)?; // hclen
 
-    for j in 0..19 {
-        writer.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
-    }
+        for j in 0..19 {
+            writer.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
+        }
 
-    for &length in lengths[..num_litlen_codes]
-        .iter()
-        .chain(&dist_lengths[..num_dist_codes])
-    {
-        writer.write_bits(
-            code_length_codes[length as usize] as u64,
-            code_length_lengths[length as usize],
-        )?;
+        for &length in lengths[..num_litlen_codes]
+            .iter()
+            .chain(&dist_lengths[..num_dist_codes])
+        {
+            writer.write_bits(
+                code_length_codes[length as usize] as u64,
+                code_length_lengths[length as usize],
+            )?;
+        }
     }
 
     for symbol in symbols {
