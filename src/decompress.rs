@@ -44,6 +44,17 @@ pub enum DecompressionError {
     WrongChecksum,
     /// Extra input data.
     ExtraInput,
+    /// The number of dynamic-Huffman decoding-table rebuilds exceeded the
+    /// limit configured via
+    /// [`Decompressor::set_max_huffman_table_rebuilds`]. Each dynamic
+    /// Huffman (`BTYPE=10`) block forces a rebuild of the decoding tables
+    /// regardless of how much output that block produces, so a stream
+    /// consisting of a very large number of minimal, near-zero-output
+    /// dynamic-Huffman blocks can be used to force an amount of CPU work
+    /// that is effectively decoupled from the compressed and decompressed
+    /// sizes of the stream. This error indicates that such a limit was
+    /// exceeded, which may indicate an attempted denial-of-service attack.
+    HuffmanTableRebuildLimitExceeded,
 }
 
 struct BlockHeader {
@@ -107,6 +118,13 @@ pub struct Decompressor {
     state: State,
     checksum: Adler32,
     ignore_adler32: bool,
+
+    // Number of times the dynamic-Huffman decoding tables have been rebuilt
+    // so far (once per `BTYPE=10` block), and the optional limit on that
+    // count. See `set_max_huffman_table_rebuilds` and
+    // `DecompressionError::HuffmanTableRebuildLimitExceeded`.
+    huffman_table_rebuilds: usize,
+    max_huffman_table_rebuilds: Option<usize>,
 }
 
 impl Default for Decompressor {
@@ -146,12 +164,40 @@ impl Decompressor {
             last_block: false,
             ignore_adler32: false,
             fixed_table: false,
+            huffman_table_rebuilds: 0,
+            max_huffman_table_rebuilds: None,
         }
     }
 
     /// Ignore the checksum at the end of the stream.
     pub fn ignore_adler32(&mut self) {
         self.ignore_adler32 = true;
+    }
+
+    /// Sets a limit on the number of times the dynamic-Huffman decoding
+    /// tables may be rebuilt over the lifetime of this `Decompressor`.
+    ///
+    /// Every dynamic-Huffman (`BTYPE=10`) block header forces a rebuild of
+    /// the literal/length decoding table (and, size permitting, the
+    /// distance table), regardless of how many bytes of output that block
+    /// actually produces. A stream consisting of a very large number of
+    /// minimal dynamic-Huffman blocks that each produce zero or very little
+    /// output can therefore force an amount of CPU work that scales with
+    /// the number of blocks, effectively independent of the compressed and
+    /// decompressed sizes of the stream. Because such a stream need not
+    /// grow the output at all, limits based on output size alone (such as
+    /// [`decompress_to_vec_bounded`]) do not protect against it.
+    ///
+    /// By default there is no limit, which preserves this crate's existing
+    /// behavior. Callers decompressing untrusted input are encouraged to
+    /// set a limit appropriate to their use case (for example, derived from
+    /// the maximum number of blocks a legitimate input of the expected size
+    /// would plausibly contain).
+    ///
+    /// Once the limit is exceeded, [`Decompressor::read`] returns
+    /// [`DecompressionError::HuffmanTableRebuildLimitExceeded`].
+    pub fn set_max_huffman_table_rebuilds(&mut self, max_rebuilds: usize) {
+        self.max_huffman_table_rebuilds = Some(max_rebuilds);
     }
 
     fn fill_buffer(&mut self, input: &mut &[u8]) {
@@ -384,6 +430,19 @@ impl Decompressor {
         }
         for i in 288 + self.header.hdist..320 {
             self.header.code_lengths[i] = 0;
+        }
+
+        // Every dynamic-Huffman block forces a full rebuild of the decoding
+        // tables below, no matter how little output the block goes on to
+        // produce. Enforce the caller-configured budget (if any) *before*
+        // paying that cost, so a chain of many minimal/empty dynamic blocks
+        // is rejected instead of silently burning CPU. See
+        // `set_max_huffman_table_rebuilds` for details.
+        self.huffman_table_rebuilds += 1;
+        if let Some(max_rebuilds) = self.max_huffman_table_rebuilds {
+            if self.huffman_table_rebuilds > max_rebuilds {
+                return Err(DecompressionError::HuffmanTableRebuildLimitExceeded);
+            }
         }
 
         Self::build_tables(
@@ -1339,5 +1398,238 @@ mod tests {
             err,
             TestDecompressionError::ProdError(DecompressionError::BadLiteralLengthHuffmanTree)
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for the dynamic-Huffman table-rebuild DoS
+    // (`max_huffman_table_rebuilds` / `HuffmanTableRebuildLimitExceeded`).
+    // ------------------------------------------------------------------
+
+    /// Minimal LSB-first bit writer, matching DEFLATE's bit order (bits are
+    /// packed starting from the LSB of the first byte), used to hand-craft
+    /// pathological block sequences that fdeflate's own compressor (which
+    /// never emits `BTYPE=10` blocks) cannot produce.
+    struct DosPocBitWriter {
+        bytes: Vec<u8>,
+        cur: u32,
+        nbits: u32,
+    }
+
+    impl DosPocBitWriter {
+        fn new() -> Self {
+            DosPocBitWriter {
+                bytes: Vec::new(),
+                cur: 0,
+                nbits: 0,
+            }
+        }
+
+        fn write_bits(&mut self, value: u32, n: u32) {
+            self.cur |= value << self.nbits;
+            self.nbits += n;
+            while self.nbits >= 8 {
+                self.bytes.push((self.cur & 0xff) as u8);
+                self.cur >>= 8;
+                self.nbits -= 8;
+            }
+        }
+
+        fn write_bit(&mut self, bit: u32) {
+            self.write_bits(bit, 1);
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.nbits > 0 {
+                self.bytes.push((self.cur & 0xff) as u8);
+            }
+            self.bytes
+        }
+    }
+
+    /// Appends one minimal dynamic-Huffman (`BTYPE=10`) block that decodes to
+    /// zero output bytes: the lit/len tree contains exactly two length-1
+    /// codes (symbol 0, unused filler, and symbol 256 = EOB, used
+    /// immediately), the distance tree is empty, and the code-length tree
+    /// used to transmit those lengths is likewise a minimal two-symbol
+    /// (CL-symbols 0 and 1) length-1 tree. Every such block forces exactly
+    /// one rebuild of the (4096-entry) primary lit/len decoding table while
+    /// producing no output at all.
+    ///
+    /// The codeword assignment used here (symbol 0 -> codeword `0`, symbol
+    /// 256 -> codeword `1`, both 1 bit) was derived by hand-tracing
+    /// `huffman::build_table`'s canonical-code assignment for this exact
+    /// two-symbol, length-1 case; see `examples/poc_dynamic_block_dos.rs`
+    /// for the standalone, timed version of this PoC with more commentary.
+    fn write_minimal_dynamic_block(w: &mut DosPocBitWriter, is_final: bool) {
+        w.write_bit(is_final as u32); // BFINAL
+        w.write_bit(0); // BTYPE bit 0
+        w.write_bit(1); // BTYPE bit 1  (=> BTYPE == 0b10, dynamic Huffman)
+
+        w.write_bits(0, 5); // HLIT = 257 - 257
+        w.write_bits(0, 5); // HDIST = 1 - 1
+        w.write_bits(15, 4); // HCLEN = 19 - 4 (transmit all 19 CL lengths)
+
+        for &sym in CLCL_ORDER.iter() {
+            let len = if sym == 0 || sym == 1 { 1 } else { 0 };
+            w.write_bits(len, 3);
+        }
+
+        w.write_bit(1); // lit/len symbol 0 has length 1
+        for _ in 0..255 {
+            w.write_bit(0); // lit/len symbols 1..=255 have length 0
+        }
+        w.write_bit(1); // lit/len symbol 256 (EOB) has length 1
+        w.write_bit(0); // dist symbol 0 has length 0
+
+        w.write_bit(1); // compressed data: EOB codeword (value 1, 1 bit)
+    }
+
+    /// Builds a full zlib stream containing `n` minimal dynamic-Huffman
+    /// blocks (the last one marked `BFINAL`), decoding to zero bytes of
+    /// output.
+    fn build_minimal_dynamic_block_chain(n: usize) -> Vec<u8> {
+        assert!(n > 0);
+        let mut w = DosPocBitWriter::new();
+        for i in 0..n {
+            write_minimal_dynamic_block(&mut w, i == n - 1);
+        }
+        let mut body = w.finish();
+
+        let mut out = Vec::with_capacity(body.len() + 6);
+        out.push(0x78);
+        out.push(0x9c);
+        out.append(&mut body);
+        out.extend_from_slice(&1u32.to_be_bytes()); // Adler-32 of empty input.
+        out
+    }
+
+    #[test]
+    fn minimal_dynamic_block_chain_is_a_well_formed_stream() {
+        // Sanity check the hand-crafted PoC generator itself: without any
+        // limit configured (the default, pre-existing behavior), chains of
+        // minimal dynamic-Huffman blocks must still decode successfully to
+        // an empty output, for a range of chain lengths.
+        for n in [1usize, 2, 3, 10, 1000] {
+            let poc = build_minimal_dynamic_block_chain(n);
+            let out = decompress_to_vec(&poc).unwrap_or_else(|e| {
+                panic!("expected successful (empty) decompression for n={n}, got {e:?}")
+            });
+            assert!(out.is_empty(), "expected empty output for n={n}");
+        }
+    }
+
+    #[test]
+    fn default_decompressor_has_no_huffman_table_rebuild_limit() {
+        // No limit is configured unless a caller opts in via
+        // `set_max_huffman_table_rebuilds`: this is the crucial
+        // non-regression check that existing callers (e.g. `png`, or any
+        // code using `decompress_to_vec`/`decompress_to_vec_bounded`) see
+        // zero behavior change. A moderately long chain of dynamic blocks
+        // (well beyond what any reasonable fixed budget would allow) must
+        // still decode successfully by default.
+        let poc = build_minimal_dynamic_block_chain(5_000);
+        let mut decompressor = Decompressor::new();
+        let mut output = vec![0; 16];
+        let (input_consumed, output_written) =
+            decompressor.read(&poc, &mut output, 0, true).unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, poc.len());
+        assert_eq!(output_written, 0);
+    }
+
+    #[test]
+    fn huffman_table_rebuild_limit_rejects_long_minimal_dynamic_block_chain() {
+        // The core regression test for the DoS fix: with a caller-configured
+        // budget in place, a stream made of many more dynamic-Huffman blocks
+        // than the budget allows must be rejected with
+        // `HuffmanTableRebuildLimitExceeded`, well before the whole input
+        // (and thus the corresponding number of expensive table rebuilds)
+        // is processed.
+        const MAX_REBUILDS: usize = 100;
+        const N_BLOCKS: usize = 10_000;
+
+        let poc = build_minimal_dynamic_block_chain(N_BLOCKS);
+        let mut decompressor = Decompressor::new();
+        decompressor.set_max_huffman_table_rebuilds(MAX_REBUILDS);
+
+        let mut output = vec![0; 16];
+        let err = decompressor
+            .read(&poc, &mut output, 0, true)
+            .expect_err("expected the rebuild budget to be exceeded");
+        assert_eq!(err, DecompressionError::HuffmanTableRebuildLimitExceeded);
+        assert!(!decompressor.is_done());
+    }
+
+    #[test]
+    fn huffman_table_rebuild_limit_allows_chain_within_budget() {
+        // A legitimate-shaped stream that stays within the configured budget
+        // must still decode successfully and completely.
+        const MAX_REBUILDS: usize = 100;
+        const N_BLOCKS: usize = 100;
+
+        let poc = build_minimal_dynamic_block_chain(N_BLOCKS);
+        let mut decompressor = Decompressor::new();
+        decompressor.set_max_huffman_table_rebuilds(MAX_REBUILDS);
+
+        let mut output = vec![0; 16];
+        let (input_consumed, output_written) =
+            decompressor.read(&poc, &mut output, 0, true).unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, poc.len());
+        assert_eq!(output_written, 0);
+    }
+
+    #[test]
+    fn huffman_table_rebuild_limit_exactly_at_budget_succeeds_one_over_fails() {
+        // Off-by-one check: exactly `MAX_REBUILDS` dynamic blocks must
+        // succeed, and `MAX_REBUILDS + 1` must fail.
+        const MAX_REBUILDS: usize = 7;
+
+        let ok_poc = build_minimal_dynamic_block_chain(MAX_REBUILDS);
+        let mut decompressor = Decompressor::new();
+        decompressor.set_max_huffman_table_rebuilds(MAX_REBUILDS);
+        let mut output = vec![0; 16];
+        decompressor
+            .read(&ok_poc, &mut output, 0, true)
+            .expect("exactly MAX_REBUILDS dynamic blocks should be allowed");
+        assert!(decompressor.is_done());
+
+        let too_many_poc = build_minimal_dynamic_block_chain(MAX_REBUILDS + 1);
+        let mut decompressor = Decompressor::new();
+        decompressor.set_max_huffman_table_rebuilds(MAX_REBUILDS);
+        let mut output = vec![0; 16];
+        let err = decompressor
+            .read(&too_many_poc, &mut output, 0, true)
+            .expect_err("MAX_REBUILDS + 1 dynamic blocks should be rejected");
+        assert_eq!(err, DecompressionError::HuffmanTableRebuildLimitExceeded);
+    }
+
+    #[test]
+    fn huffman_table_rebuild_limit_does_not_affect_legitimate_dynamic_huffman_data() {
+        // Correctness check: normal, legitimate data that miniz_oxide
+        // chooses to encode with dynamic-Huffman blocks (fdeflate's own
+        // compressor never emits BTYPE=10, so we rely on miniz_oxide here,
+        // same as the existing `roundtrip_miniz_oxide` tests) must still
+        // decode identically, byte for byte, whether or not a generous
+        // rebuild budget is configured.
+        let mut rng = rand::thread_rng();
+        let mut data = vec![0u8; 200_000];
+        for byte in &mut data {
+            *byte = rng.gen::<u8>() % 5;
+        }
+        let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&data, 6);
+
+        let baseline = decompress_to_vec(&compressed).unwrap();
+        assert_eq!(baseline, data);
+
+        let mut decompressor = Decompressor::new();
+        decompressor.set_max_huffman_table_rebuilds(1_000_000);
+        let mut output = vec![0; data.len()];
+        let (input_consumed, output_written) = decompressor
+            .read(&compressed, &mut output, 0, true)
+            .unwrap();
+        assert!(decompressor.is_done());
+        assert_eq!(input_consumed, compressed.len());
+        assert_eq!(&output[..output_written], data.as_slice());
     }
 }
