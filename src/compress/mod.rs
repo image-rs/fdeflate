@@ -19,6 +19,7 @@ use crate::compress::{
 };
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
+const INPUT_CHUNK_SIZE: usize = 1024 * 1024 * 1024;
 const WINDOW_SIZE: usize = 32768;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,9 +142,8 @@ impl<W: Write> Compressor<W> {
     pub fn write_data(&mut self, data: &[u8]) -> std::io::Result<()> {
         // Encoders use 32-bit indices in various places for performance. Limiting the input size
         // here simplifies things.
-        const CHUNK_SIZE: usize = 1024 * 1024 * 1024;
-        if data.len() > CHUNK_SIZE {
-            for chunk in data.chunks(CHUNK_SIZE) {
+        if data.len() > INPUT_CHUNK_SIZE {
+            for chunk in data.chunks(INPUT_CHUNK_SIZE) {
                 self.write_data(chunk)?;
             }
             return Ok(());
@@ -240,6 +240,34 @@ impl<W: Write> Compressor<W> {
         self.input.base_index += (self.input.written + written) as u32;
         self.input.written = 0;
 
+        self.finish_writer()
+    }
+
+    /// Finish a newly-created compressor using its first input buffer directly.
+    fn finish_with_data(mut self, data: &[u8]) -> std::io::Result<W> {
+        if data.len() > INPUT_CHUNK_SIZE {
+            self.write_data(data)?;
+            return self.finish();
+        }
+
+        debug_assert!(
+            self.input.data.is_empty() && self.input.base_index == 0 && self.input.written == 0,
+            "direct input requires a newly-created compressor"
+        );
+
+        if let Some(ref mut checksum) = self.checksum {
+            checksum.write(data);
+        }
+
+        let written = self
+            .inner
+            .compress(&mut self.writer, data, 0, 0, Flush::Finish)?;
+        debug_assert_eq!(written, data.len(), "finishing must consume all input");
+
+        self.finish_writer()
+    }
+
+    fn finish_writer(mut self) -> std::io::Result<W> {
         let writer = self.writer.flush()?;
         if let Some(checksum) = self.checksum.take() {
             let checksum_value = checksum.finish();
@@ -349,16 +377,14 @@ pub fn compress_to_vec(input: &[u8]) -> Vec<u8> {
 
 /// Compresses the given data with a specific compression level.
 pub fn compress_to_vec_with_level(input: &[u8], level: u8) -> Vec<u8> {
-    let mut compressor = Compressor::new(Vec::with_capacity(input.len() / 4), level, true).unwrap();
-    compressor.write_data(input).unwrap();
-    compressor.finish().unwrap()
+    let compressor = Compressor::new(Vec::with_capacity(input.len() / 4), level, true).unwrap();
+    compressor.finish_with_data(input).unwrap()
 }
 
 /// Compresses the given data using only RLE matches.
 pub fn compress_to_vec_rle(input: &[u8]) -> Vec<u8> {
-    let mut compressor = Compressor::new_rle(Vec::with_capacity(input.len() / 4), true).unwrap();
-    compressor.write_data(input).unwrap();
-    compressor.finish().unwrap()
+    let compressor = Compressor::new_rle(Vec::with_capacity(input.len() / 4), true).unwrap();
+    compressor.finish_with_data(input).unwrap()
 }
 
 /// Compresses the given data using the ultra fast compression method.
