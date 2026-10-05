@@ -95,9 +95,9 @@ impl<W: Write> UltraFastCompressor<W> {
         self.checksum.write(data);
 
         let mut run = 0;
-        let mut chunks = data.chunks_exact(8);
-        for chunk in &mut chunks {
-            let ichunk = u64::from_le_bytes(chunk.try_into().unwrap());
+        let (chunks, remainder) = data.as_chunks::<8>();
+        for chunk in chunks {
+            let ichunk = u64::from_le_bytes(*chunk);
 
             if ichunk == 0 {
                 run += 8;
@@ -156,7 +156,7 @@ impl<W: Write> UltraFastCompressor<W> {
             self.write_run(run)?;
         }
 
-        for &b in chunks.remainder() {
+        for &b in remainder {
             self.write_bits(
                 HUFFMAN_CODES[b as usize] as u64,
                 HUFFMAN_LENGTHS[b as usize],

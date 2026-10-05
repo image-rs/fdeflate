@@ -56,15 +56,16 @@ pub(crate) fn write_block<W: Write>(
     for symbol in symbols {
         match symbol {
             Symbol::LiteralRun { start, end } => {
-                let mut chunks = data[(*start - base_index) as usize..(*end - base_index) as usize]
-                    .chunks_exact(4);
-                for chunk in &mut chunks {
+                let (chunks, remainder) = data
+                    [(*start - base_index) as usize..(*end - base_index) as usize]
+                    .as_chunks::<4>();
+                for chunk in chunks {
                     frequencies[chunk[0] as usize] += 1;
                     f2[chunk[1] as usize] += 1;
                     f3[chunk[2] as usize] += 1;
                     f4[chunk[3] as usize] += 1;
                 }
-                for &lit in chunks.remainder() {
+                for &lit in remainder {
                     frequencies[lit as usize] += 1;
                 }
             }
@@ -214,9 +215,10 @@ pub(crate) fn write_block<W: Write>(
     for symbol in symbols {
         match symbol {
             Symbol::LiteralRun { start, end } => {
-                let mut groups = data[(*start - base_index) as usize..(*end - base_index) as usize]
-                    .chunks_exact(4);
-                for group in &mut groups {
+                let (groups, remainder) = data
+                    [(*start - base_index) as usize..(*end - base_index) as usize]
+                    .as_chunks::<4>();
+                for group in groups {
                     let code0 = codes[group[0] as usize] as u64;
                     let code1 = codes[group[1] as usize] as u64;
                     let code2 = codes[group[2] as usize] as u64;
@@ -236,7 +238,7 @@ pub(crate) fn write_block<W: Write>(
                     )?;
                 }
 
-                for &lit in groups.remainder() {
+                for &lit in remainder {
                     writer.write_bits(codes[lit as usize] as u64, lengths[lit as usize])?;
                 }
             }

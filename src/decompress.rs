@@ -408,11 +408,11 @@ impl Decompressor {
                 if !self.fixed_table {
                     self.fixed_table = true;
                     assert!(self.compression.litlen_table.len() >= FIXED_LITLEN_TABLE.len());
-                    for chunk in self.compression.litlen_table.chunks_exact_mut(512) {
+                    for chunk in self.compression.litlen_table.as_chunks_mut::<512>().0 {
                         chunk.copy_from_slice(&FIXED_LITLEN_TABLE);
                     }
                     assert!(self.compression.dist_table.len() >= FIXED_DIST_TABLE.len());
-                    for chunk in self.compression.dist_table.chunks_exact_mut(32) {
+                    for chunk in self.compression.dist_table.as_chunks_mut::<32>().0 {
                         chunk.copy_from_slice(&FIXED_DIST_TABLE);
                     }
                     self.compression.eof_bits = 7;
