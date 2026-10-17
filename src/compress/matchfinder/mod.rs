@@ -115,9 +115,30 @@ pub(super) fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
 
     let mut m = Match::new(4, 1, ip + 1);
     let min_start = 1.max(last_match).max(m.end().saturating_sub(258));
-    while m.start > min_start && data[m.start - 2] == value {
-        m.start -= 1;
-        m.length += 1;
+    // Greedy lookahead can revisit nearly a whole 258-byte run. Scan backwards
+    // in words, just as the forward search below does, instead of paying for
+    // a dependent branch for every byte on every visit.
+    'backward: {
+        let mut chunks = data[min_start - 1..m.start - 1].rchunks_exact(8);
+        for chunk in &mut chunks {
+            let difference =
+                u64::from_le_bytes(chunk.try_into().unwrap()) ^ u64::from_le_bytes([value; 8]);
+            if difference != 0 {
+                let matched = difference.leading_zeros() as usize / 8;
+                m.start -= matched;
+                m.length += matched as u16;
+                break 'backward;
+            }
+            m.start -= 8;
+            m.length += 8;
+        }
+        for &byte in chunks.remainder().iter().rev() {
+            if byte != value {
+                break;
+            }
+            m.start -= 1;
+            m.length += 1;
+        }
     }
 
     let data = &data[m.end()..];
@@ -142,6 +163,41 @@ pub(super) fn rle_match(data: &[u8], last_match: usize, ip: usize) -> Match {
     }
 
     m
+}
+
+#[test]
+fn rle_matches_bytewise_reference_at_run_and_word_boundaries() {
+    for prefix in 0..16 {
+        for length in [5, 6, 7, 8, 9, 15, 16, 17, 127, 257, 258, 259, 300, 600] {
+            let mut data = vec![b'x'; prefix];
+            data.extend(std::iter::repeat_n(b'a', length));
+            data.extend_from_slice(b"different suffix");
+            for ip in prefix..=prefix + length - 5 {
+                for anchor in [0, prefix, ip.saturating_sub(256), ip.saturating_sub(8), ip] {
+                    let mut expected = Match::new(4, 1, ip + 1);
+                    while expected.length < 258
+                        && expected.start > 1.max(anchor)
+                        && data[expected.start - 2] == data[ip]
+                    {
+                        expected.start -= 1;
+                        expected.length += 1;
+                    }
+                    while expected.length < 258
+                        && expected.end() < data.len()
+                        && data[expected.end()] == data[ip]
+                    {
+                        expected.length += 1;
+                    }
+                    let actual = rle_match(&data, anchor, ip);
+                    assert_eq!(
+                        (actual.start, actual.length, actual.distance),
+                        (expected.start, expected.length, expected.distance),
+                        "prefix={prefix} length={length} ip={ip} anchor={anchor}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub(crate) trait MatchFinder {
