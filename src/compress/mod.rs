@@ -2,11 +2,15 @@ mod bitstream;
 mod bitwriter;
 mod matchfinder;
 mod parse;
+mod streaming;
+
+pub use streaming::{
+    CompressionError, CompressionFlush, CompressionProgress, CompressionStatus, StreamingCompressor,
+};
 mod ultrafast;
 
 use std::io::{self, Write};
 
-use simd_adler32::Adler32;
 pub use ultrafast::UltraFastCompressor;
 
 use bitwriter::BitWriter;
@@ -25,6 +29,7 @@ const WINDOW_SIZE: usize = 32768;
 #[non_exhaustive]
 enum Flush {
     None,
+    Batch,
     Partial,
     Full,
     Sync,
@@ -58,195 +63,93 @@ pub enum FlushKind {
     Full,
 }
 
-/// Compressor that produces zlib or raw deflate compressed streams.
+/// Compressor that writes a bounded streaming encoder's output to a writer.
 pub struct Compressor<W: Write> {
-    /// State specific to the chosen compression level.
-    inner: CompressorInner,
-
-    /// Buffered input data.
-    input: InputStream,
-
-    /// Bit writer for writing output data.
-    writer: BitWriter<W>,
-
-    //// How much lookback to use for compression.
-    window_size: usize,
-
-    checksum: Option<Adler32>,
+    inner: StreamingCompressor,
+    writer: W,
+    output: Box<[u8]>,
+    failed: bool,
 }
 impl<W: Write> Compressor<W> {
-    /// Create a new compressor.
-    ///
-    /// `level` is the compression level, where 0 is no compression values 1-9 are different levels
-    /// of compression.
-    ///
-    /// `zlib` indicates whether to write a zlib header and checksum.
-    pub fn new(mut writer: W, level: u8, zlib: bool) -> io::Result<Self> {
-        if zlib {
-            writer.write_all(&[0x78, 0x01])?; // zlib header
-        }
-
-        use CompressorInner::*;
-        let inner = match level {
-            0 => Uncompressed,
-            1 => Fast(GreedyParser::new(5, HashTableMatchFinder::new())),
-            2 => MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(8, 16, 64))),
-            3 => Medium(GreedyParser::new(6, HashChainMatchFinder::new(6, 16, 32))),
-            4 => High(LazyParser::new(9, 12, HybridMatchFinder::new(5, 16, 32))),
-            5 => High(LazyParser::new(9, 16, HybridMatchFinder::new(5, 64, 64))),
-            6 => High(LazyParser::new(9, 16, HybridMatchFinder::new(4, 128, 128))),
-            7.. => High(LazyParser::new(
-                12,
-                256,
-                HybridMatchFinder::new(4, 256, 258),
-            )),
+    /// Creates a raw or zlib compressor at compression level 0 through 9.
+    pub fn new(writer: W, level: u8, zlib: bool) -> io::Result<Self> {
+        let mut compressor = Self {
+            inner: StreamingCompressor::new(level, zlib),
+            writer,
+            output: vec![0; 32 * 1024].into_boxed_slice(),
+            failed: false,
         };
-
-        Ok(Self {
-            inner,
-            writer: BitWriter::new(writer),
-            input: InputStream {
-                data: Vec::new(),
-                base_index: 0,
-                written: 0,
-            },
-            window_size: if level == 0 { 0 } else { WINDOW_SIZE },
-            checksum: zlib.then(Adler32::new),
-        })
+        // Preserve the writer API's eager zlib header.
+        compressor.run(&[], CompressionFlush::None)?;
+        Ok(compressor)
     }
 
-    /// Create a new compressor that only emits RLE matches.
-    ///
-    /// This mode is expected to be significantly faster even than level 1, but get somewhat worse
-    /// compression ratios. It corresponds to the Z_RLE option in zlib.
-    pub fn new_rle(mut writer: W, zlib: bool) -> io::Result<Self> {
-        if zlib {
-            writer.write_all(&[0x78, 0x01])?; // zlib header
+    /// Creates a compressor that only emits RLE matches.
+    pub fn new_rle(writer: W, zlib: bool) -> io::Result<Self> {
+        let mut compressor = Self {
+            inner: StreamingCompressor::new_rle(zlib),
+            writer,
+            output: vec![0; 32 * 1024].into_boxed_slice(),
+            failed: false,
+        };
+        compressor.run(&[], CompressionFlush::None)?;
+        Ok(compressor)
+    }
+
+    fn run(&mut self, mut input: &[u8], flush: CompressionFlush) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other(
+                "compressor cannot resume after a writer error",
+            ));
         }
-
-        Ok(Self {
-            inner: CompressorInner::Rle(RleParser::new(5)),
-            writer: BitWriter::new(writer),
-            input: InputStream {
-                data: Vec::new(),
-                base_index: 0,
-                written: 0,
-            },
-            window_size: 1,
-            checksum: zlib.then(Adler32::new),
-        })
-    }
-
-    /// Write data to the compressor.
-    pub fn write_data(&mut self, data: &[u8]) -> std::io::Result<()> {
-        // Encoders use 32-bit indices in various places for performance. Limiting the input size
-        // here simplifies things.
-        const CHUNK_SIZE: usize = 1024 * 1024 * 1024;
-        if data.len() > CHUNK_SIZE {
-            for chunk in data.chunks(CHUNK_SIZE) {
-                self.write_data(chunk)?;
+        let result = (|| loop {
+            let progress = self.inner.process(input, &mut self.output, flush);
+            input = &input[progress.consumed..];
+            self.writer.write_all(&self.output[..progress.produced])?;
+            let status = progress.status.map_err(io::Error::other)?;
+            if status != CompressionStatus::NeedsOutput {
+                return Ok(());
             }
-            return Ok(());
-        }
-
-        if let Some(ref mut checksum) = self.checksum {
-            checksum.write(data);
-        }
-
-        // If we have no buffered input, attempt to compress directly from the input buffer.
-        if self.input.data.is_empty() {
-            let written = self.inner.compress(
-                &mut self.writer,
-                data,
-                self.input.base_index,
-                0,
-                Flush::None,
-            )?;
-
-            let start = written.saturating_sub(self.window_size);
-            self.input.data.extend_from_slice(&data[start..]);
-            self.input.base_index += start as u32;
-            self.input.written = written - start;
-            return Ok(());
-        }
-
-        // If the indices used by the compressor would overflow, reset the base index.
-        if u64::from(self.input.base_index) + data.len() as u64 > u64::from(u32::MAX) {
-            self.inner.reset_indices(self.input.base_index);
-            self.input.base_index = 0;
-        }
-
-        // Append the new data to the input buffer and compress it.
-        self.input.data.extend_from_slice(data);
-        let written = self.inner.compress(
-            &mut self.writer,
-            &self.input.data,
-            self.input.base_index,
-            self.input.written,
-            Flush::None,
-        )?;
-        self.input.written += written;
-
-        // Discard input data from before the start of the window, but avoid doing so too often.
-        let discard = self.input.written.saturating_sub(self.window_size);
-        if discard > 128 * 1024 {
-            self.input.discard_bytes(discard);
-        }
-
-        Ok(())
+        })();
+        self.failed = result.is_err();
+        result
     }
 
-    /// Flush the compressor with the given flush kind.
-    pub fn flush(&mut self, flush: FlushKind) -> std::io::Result<()> {
-        let written = self.inner.compress(
-            &mut self.writer,
-            &self.input.data,
-            self.input.base_index,
-            self.input.written,
+    /// Writes all input, emitting blocks as the bounded input buffer fills.
+    /// After a writer error the compressor must be discarded.
+    pub fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
+        self.run(data, CompressionFlush::None)
+    }
+
+    /// Flushes pending input and output with the specified flush kind.
+    pub fn flush(&mut self, flush: FlushKind) -> io::Result<()> {
+        self.run(
+            &[],
             match flush {
-                FlushKind::Partial => Flush::Partial,
-                FlushKind::Full => Flush::Full,
-                FlushKind::Sync => Flush::Sync,
+                FlushKind::Partial => CompressionFlush::Partial,
+                FlushKind::Sync => CompressionFlush::Sync,
+                FlushKind::Full => CompressionFlush::Full,
             },
         )?;
-        self.input.written += written;
-
-        if flush == FlushKind::Full {
-            self.input.data.clear();
-            self.input.written = 0;
-            self.input.base_index = 0;
-        } else {
-            // Discard input data from before the start of the window, but avoid doing so too often.
-            let discard = self.input.written.saturating_sub(self.window_size);
-            if discard > 128 * 1024 {
-                self.input.discard_bytes(discard);
-            }
-        }
-
-        Ok(())
+        let result = self.writer.flush();
+        self.failed = result.is_err();
+        result
     }
 
-    /// Write the remainder of the stream and return the inner writer.
-    pub fn finish(mut self) -> std::io::Result<W> {
-        let written = self.inner.compress(
-            &mut self.writer,
-            &self.input.data,
-            self.input.base_index,
-            self.input.written,
-            Flush::Finish,
-        )?;
+    /// Gets a shared reference to the wrapped writer.
+    pub fn get_ref(&self) -> &W {
+        &self.writer
+    }
 
-        self.input.data.clear();
-        self.input.base_index += (self.input.written + written) as u32;
-        self.input.written = 0;
+    /// Gets a mutable reference to the wrapped writer.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.writer
+    }
 
-        let writer = self.writer.flush()?;
-        if let Some(checksum) = self.checksum.take() {
-            let checksum_value = checksum.finish();
-            writer.write_all(&checksum_value.to_be_bytes())?;
-        }
-
-        Ok(self.writer.take())
+    /// Finishes the stream and returns the writer.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.run(&[], CompressionFlush::Finish)?;
+        Ok(self.writer)
     }
 }
 
@@ -259,6 +162,45 @@ enum CompressorInner {
     High(LazyParser),
 }
 impl CompressorInner {
+    fn new(level: u8) -> Self {
+        match level {
+            0 => Self::Uncompressed,
+            1 => Self::Fast(GreedyParser::new(5, HashTableMatchFinder::new())),
+            2 => Self::MediumFast(GreedyParser::new(6, HashChainMatchFinder::new(8, 16, 64))),
+            3 => Self::Medium(GreedyParser::new(6, HashChainMatchFinder::new(6, 16, 32))),
+            4 => Self::High(LazyParser::new(9, 12, HybridMatchFinder::new(5, 16, 32))),
+            5 => Self::High(LazyParser::new(9, 16, HybridMatchFinder::new(5, 64, 64))),
+            6 => Self::High(LazyParser::new(9, 16, HybridMatchFinder::new(4, 128, 128))),
+            _ => Self::High(LazyParser::new(
+                12,
+                256,
+                HybridMatchFinder::new(4, 256, 258),
+            )),
+        }
+    }
+
+    fn pending_bits(&self) -> usize {
+        match self {
+            Self::Uncompressed => 0,
+            Self::Rle(p) => p.pending_bits(),
+            Self::Fast(p) => p.pending_bits(),
+            Self::MediumFast(p) => p.pending_bits(),
+            Self::Medium(p) => p.pending_bits(),
+            Self::High(p) => p.pending_bits(),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Uncompressed => {}
+            Self::Rle(p) => p.reset(),
+            Self::Fast(p) => p.reset(),
+            Self::MediumFast(p) => p.reset(),
+            Self::Medium(p) => p.reset(),
+            Self::High(p) => p.reset(),
+        }
+    }
+
     fn compress<W: Write>(
         &mut self,
         writer: &mut BitWriter<W>,
@@ -267,7 +209,7 @@ impl CompressorInner {
         start: usize,
         flush: Flush,
     ) -> std::io::Result<usize> {
-        if flush == Flush::Finish && input.len() == start {
+        if matches!(self, Self::Uncompressed) && flush == Flush::Finish && input.len() == start {
             writer.write_bits(3, 10)?;
             writer.flush()?;
             return Ok(0);

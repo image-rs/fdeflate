@@ -12,6 +12,13 @@ pub(crate) struct GreedyParser<M> {
 }
 
 impl<M: MatchFinder> GreedyParser<M> {
+    pub fn pending_bits(&self) -> usize {
+        self.inner.pending_bits()
+    }
+    pub fn reset(&mut self) {
+        self.inner.reset();
+        self.m = Match::empty();
+    }
     pub fn new(skip_ahead_shift: u8, match_finder: M) -> Self {
         Self {
             inner: ParserInner::new(skip_ahead_shift, match_finder),
@@ -32,7 +39,7 @@ impl<M: MatchFinder> GreedyParser<M> {
         start: usize,
         flush: Flush,
     ) -> io::Result<usize> {
-        let delta = self.inner.start_compress(data, base_index, start);
+        let delta = self.inner.start_compress(data, base_index);
         if !self.m.is_empty() {
             self.m.start -= delta;
         }
@@ -66,9 +73,8 @@ impl<M: MatchFinder> GreedyParser<M> {
             // overlap. If so, it'll probably be cheaper to emit an extra literal rather than an
             // extra backref.
             if m2.is_empty() || m2.start > self.m.start + 1 {
-                self.inner.insert_match(base_index, self.m);
-                self.inner
-                    .write_block_if_ready(writer, data, base_index, flush)?;
+                self.inner.insert_match(writer, data, self.m)?;
+                self.inner.write_block_if_ready(writer, data)?;
 
                 // If the next match starts before the end of the current match, we need to
                 // adjust the next match length and start position.
@@ -86,7 +92,6 @@ impl<M: MatchFinder> GreedyParser<M> {
             self.m = m2;
         }
 
-        self.inner
-            .end_compress(writer, data, base_index, start, flush)
+        self.inner.end_compress(writer, data, start, flush)
     }
 }

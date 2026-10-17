@@ -7,6 +7,12 @@ pub(crate) struct RleParser {
 }
 
 impl RleParser {
+    pub fn pending_bits(&self) -> usize {
+        self.inner.pending_bits()
+    }
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
     pub fn new(skip_ahead_shift: u8) -> Self {
         Self {
             inner: ParserInner::new(skip_ahead_shift, NullMatchFinder),
@@ -25,7 +31,7 @@ impl RleParser {
         start: usize,
         flush: Flush,
     ) -> io::Result<usize> {
-        self.inner.start_compress(data, base_index, start);
+        self.inner.start_compress(data, base_index);
 
         let lookahead = if flush == Flush::None { 258 } else { 7 };
         let max_ip = data.len().saturating_sub(lookahead);
@@ -37,12 +43,10 @@ impl RleParser {
             }
 
             self.inner.ip = m.end();
-            self.inner.insert_match(base_index, m);
-            self.inner
-                .write_block_if_ready(writer, data, base_index, flush)?;
+            self.inner.insert_match(writer, data, m)?;
+            self.inner.write_block_if_ready(writer, data)?;
         }
 
-        self.inner
-            .end_compress(writer, data, base_index, start, flush)
+        self.inner.end_compress(writer, data, start, flush)
     }
 }

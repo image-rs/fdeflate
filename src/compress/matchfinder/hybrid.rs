@@ -37,7 +37,9 @@ impl HybridMatchFinder {
         }
     }
 
-    #[inline] // benchmarks indicated this is beneficial, see #74
+    // Inline both this function and get_and_insert into the parser. A separate
+    // call per lookup measurably slows mixed input in the bounded streaming encoder.
+    #[inline(always)]
     fn lookup(
         &mut self,
         data: &[u8],
@@ -141,7 +143,7 @@ impl HybridMatchFinder {
 }
 
 impl MatchFinder for HybridMatchFinder {
-    #[inline] // benchmarks indicated this is beneficial, see #74
+    #[inline(always)]
     fn get_and_insert(
         &mut self,
         data: &[u8],

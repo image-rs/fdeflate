@@ -67,3 +67,9 @@ name = "inflate_split"
 path = "fuzz_targets/inflate_split.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "inflate_streaming"
+path = "fuzz_targets/inflate_streaming.rs"
+test = false
+doc = false

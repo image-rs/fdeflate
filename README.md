@@ -22,6 +22,34 @@ The decoder employs several modern features than help it achieve exceptional per
 
 The compressor is still under active development, with the current status tracked on the main branch.
 
+`StreamingCompressor` accepts input and output slices, returning separate consumed
+and produced counts plus a stopping reason. It supports raw DEFLATE and zlib,
+partial/sync/full flushes, and finishing. Pass unconsumed input again with the
+same flush request. Once all input has been accepted, that flush remains pending
+until delivered; repeating a completed flush without new input is a no-op.
+`process_uninit` writes to `MaybeUninit<u8>` storage without initializing unused
+capacity, using only safe Rust.
+
+Working storage is bounded independently of the stream length. The encoder
+buffers at most 128 KiB of new input plus a 32 KiB history window, limits symbol
+storage to 16,388 entries, and reserves 131,201 bytes for encoded output. Each
+block compares fixed, dynamic, and stored encoding costs; the stored alternative
+bounds expansion. A sufficiently large destination receives a batch directly;
+smaller destinations drain the reserved buffer before more input is accepted.
+The match tables and Huffman workspace have fixed bounds too. Automatic blocks
+preserve history, and long streams rebase match indices without resetting it.
+`reset` reuses the working allocations. These block boundaries can change the
+compressed bytes and compression ratio compared with the previous writer API.
+
+`Compressor<W>` drives the same core through a reusable 32 KiB writer buffer.
+After an underlying writer error it must be discarded. For resumable output
+backpressure, use `StreamingCompressor` and retain any bytes not yet written.
+
+`Decompressor::read_progress` reports consumed and produced counts even on an
+error. Its output prefix must contain the previous 32 KiB of history (or all
+previous output if shorter), as with `read`. A decoding error remains terminal
+until `reset`.
+
 <!-- Internally, `fdeflate` (like other compression libraries) maps different compression levels to different algorithms and parameters. -->
 
 [Preliminary benchmark data](https://github.com/image-rs/fdeflate/discussions/68) shows that `fdeflate` meaningfully outperforms `zlib-rs` for levels 1-3 and is slightly better for levels 4-7. Levels 8 and 9 aren't yet implemented.

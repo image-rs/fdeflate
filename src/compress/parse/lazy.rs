@@ -14,6 +14,14 @@ pub(crate) struct LazyParser {
 }
 
 impl LazyParser {
+    pub fn pending_bits(&self) -> usize {
+        self.inner.pending_bits()
+    }
+    pub fn reset(&mut self) {
+        self.inner.reset();
+        self.m0 = Match::empty();
+        self.m1 = Match::empty();
+    }
     pub fn new(skip_ahead_shift: u8, max_lazy: u16, match_finder: HybridMatchFinder) -> Self {
         Self {
             inner: ParserInner::new(skip_ahead_shift, match_finder),
@@ -36,7 +44,7 @@ impl LazyParser {
         start: usize,
         flush: Flush,
     ) -> io::Result<usize> {
-        let delta = self.inner.start_compress(data, base_index, start);
+        let delta = self.inner.start_compress(data, base_index);
         if !self.m0.is_empty() {
             self.m0.start -= delta;
         }
@@ -85,13 +93,14 @@ impl LazyParser {
 
                 if !self.m0.is_empty() && self.m0.start + 4 <= self.m1.start {
                     self.m0.length = self.m0.length.min((self.m1.start - self.m0.start) as u16);
-                    self.inner.insert_match(base_index, self.m0);
+                    self.inner.insert_match(writer, data, self.m0)?;
                     self.m0 = Match::empty();
                 }
 
-                self.inner.insert_match(base_index, self.m1);
+                self.inner.insert_match(writer, data, self.m1)?;
                 self.m0 = Match::empty();
                 self.m1 = Match::empty();
+                self.inner.write_block_if_ready(writer, data)?;
                 continue;
             } else if m2.start <= self.m1.start {
                 self.m1 = m2;
@@ -108,11 +117,9 @@ impl LazyParser {
                 self.m1 = m2;
             }
 
-            self.inner
-                .write_block_if_ready(writer, data, base_index, flush)?;
+            self.inner.write_block_if_ready(writer, data)?;
         }
 
-        self.inner
-            .end_compress(writer, data, base_index, start, flush)
+        self.inner.end_compress(writer, data, start, flush)
     }
 }
